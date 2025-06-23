@@ -35,20 +35,20 @@ def make_augmented(image_path, mask_path):
         A.HueSaturationValue(hue_shift_limit=5, sat_shift_limit=10, val_shift_limit=10, p=1)
     ])
     aug_img = transform(image=image)["image"]
-    create_image_in_dir(aug_img, mask_t, f"{name}_Contrast&hue{ext}")
+    create_image_in_dir(aug_img, mask_t, f"{name}_Contrast_&_hue{ext}")
 
     transform = A.Compose([
         A.CLAHE(clip_limit=4.0, tile_grid_size=(8, 8), p=1),
         A.RGBShift(r_shift_limit=10, g_shift_limit=10, b_shift_limit=10, p=1)
     ])
     aug_img = transform(image=image)["image"]
-    create_image_in_dir(aug_img, mask_t, f"{name}_CLAHE&RGBshift{ext}")
+    create_image_in_dir(aug_img, mask_t, f"{name}_CLAHE_&_RGBshift{ext}")
 
-    transform = A.Compose([
-        A.RandomGamma(gamma_limit=(80, 120), p=1),
-    ])
-    aug_img = transform(image=image)["image"]
-    create_image_in_dir(aug_img, mask_t, f"{name}_gamma{ext}")
+    # transform = A.Compose([
+    #     A.RandomGamma(gamma_limit=(80, 120), p=1),
+    # ])
+    # aug_img = transform(image=image)["image"]
+    # create_image_in_dir(aug_img, mask_t, f"{name}_gamma{ext}")
 
 
 

@@ -54,15 +54,13 @@ def make_teethed_crops(imgpath, maskpath, maxcorrelation, xsize, ysize, target_c
         total_pixels = xsize * ysize
         white_ratio = white_pixels / total_pixels
 
-        if white_ratio < 0.10:
+        if white_ratio < 0.15 or white_ratio > 0.9:
             attempts += 1
             continue
 
         valid_crops.append((x, y))
         attempts += 1
 
-    if len(valid_crops) < target_count:
-        raise RuntimeError(f" Could not find enough valid crops for {imgpath}. Found only {len(valid_crops)} after {attempts} attempts.")
 
     for idx, (x, y) in enumerate(valid_crops[:target_count]):
         crop = image[y:y+ysize, x:x+xsize]
@@ -109,15 +107,13 @@ def make_pureblack_crops(imgpath, maskpath, maxcorrelation, xsize, ysize, target
         total_pixels = xsize * ysize
         white_ratio = white_pixels / total_pixels
 
-        if white_ratio > 0.10:
+        if white_ratio > 0.15 or white_ratio < 0.05:
             attempts += 1
             continue
 
         valid_crops.append((x, y))
         attempts += 1
 
-    if len(valid_crops) < target_count:
-        raise RuntimeError(f" Could not find enough valid crops for {imgpath}. Found only {len(valid_crops)} after {attempts} attempts.")
 
     for idx, (x, y) in enumerate(valid_crops[:target_count]):
         crop = image[y:y+ysize, x:x+xsize]

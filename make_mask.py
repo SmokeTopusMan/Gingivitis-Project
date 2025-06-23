@@ -106,12 +106,12 @@ def main():
         print(f"Error: {sys.argv[1]} is not a valid directory.")
         sys.exit(1)
 
-    # image_dir = os.path.join(sys.argv[1], "images")
-    # label_dir = os.path.join(sys.argv[1], "labels")
-    # output_dir = os.path.join(sys.argv[1], "masks")
-    # rename_images_in_directory(image_dir, 337)
-    # rename_images_in_directory(label_dir, 337)
-    # yolo_generate_masks(image_dir, label_dir, output_dir)
+    image_dir = os.path.join(sys.argv[1], "images")
+    label_dir = os.path.join(sys.argv[1], "labels")
+    output_dir = os.path.join(sys.argv[1], "masks")
+    rename_images_in_directory(image_dir, 404)
+    rename_images_in_directory(label_dir, 404)
+    yolo_generate_masks(image_dir, label_dir, output_dir)
 
 
 if __name__ == "__main__":
