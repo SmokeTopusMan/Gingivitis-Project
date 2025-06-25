@@ -105,7 +105,7 @@ loss_fn = smp.losses.DiceLoss("binary")
 optimizer = optim.Adam(model.parameters(), lr=1e-4)
 
 # Training loop
-for epoch in range(15):
+for epoch in range(5):
     print(f"\nEpoch {epoch + 1}/15")
     model.train()
     batch_count = 0
