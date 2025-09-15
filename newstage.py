@@ -420,7 +420,7 @@ val_transform = A.Compose([
 ], additional_targets={"mask": "mask"})
 
 # Create full dataset
-full_dataset = SegmentationDataset("newstage/train/relevant_images", "newstage/train/masks", train_transform)
+full_dataset = SegmentationDataset("newstage/train/crops_images", "newstage/train/mask_crops_images", train_transform)
 
 # Split dataset into train and validation (80/20 split)
 train_size = int(0.8 * len(full_dataset))
@@ -431,7 +431,7 @@ print(f"Dataset split: {train_size} training, {val_size} validation")
 train_dataset, val_indices = random_split(full_dataset, [train_size, val_size])
 
 # Create validation dataset with different transform
-val_dataset = SegmentationDataset("newstage/train/relevant_images", "newstage/train/masks", val_transform)
+val_dataset = SegmentationDataset("newstage/train/crops_images", "newstage/train/mask_crops_images", val_transform)
 val_dataset.images = [full_dataset.images[i] for i in val_indices.indices]
 
 # Data loaders
@@ -575,7 +575,7 @@ for epoch in range(num_epochs):
     if avg_val_dice > best_val_dice:
         best_val_dice = avg_val_dice
         patience_counter = 0
-        torch.save(model.state_dict(), "best_model.pth")
+        torch.save(model.state_dict(), "best_model_ging.pth")
         print(f"  ✓ New best validation Dice: {best_val_dice:.4f} - Model saved!")
     else:
         patience_counter += 1
@@ -592,7 +592,7 @@ plot_training_history(train_losses, val_losses, train_dice_scores, val_dice_scor
 
 # Load best model for testing
 print("\nLoading best model for testing...")
-model.load_state_dict(torch.load("best_model.pth"))
+model.load_state_dict(torch.load("best_model_ging.pth"))
 
 # Testing/Evaluation - LOAD TEST IMAGES AT ORIGINAL SIZE
 print("Starting evaluation on test set...")
