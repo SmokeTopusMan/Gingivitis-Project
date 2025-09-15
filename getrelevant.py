@@ -135,7 +135,7 @@ def cut_to_the_chase_chunked(image_path, mask_path):
             result[y, x] = [0, 0, 0]
     
     # Save the result
-    output_filename = f"{name}_relevant{ext}"
+    output_filename = f"{name}{ext}"
     create_image_in_dir(result, output_filename)
     
     # Clean up memory
@@ -185,4 +185,5 @@ def main():
 if __name__ == "__main__":
 
     main()
+
 
