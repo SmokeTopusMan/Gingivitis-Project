@@ -167,7 +167,7 @@ def predict_large_image(image, model, device, crop_size=512, stride=128,
     # For crop-level Dice tracking
     crop_dice_scores = []
 
-        model.eval()
+    model.eval()
     with torch.no_grad():
         for batch_start in range(0, len(crop_coords), batch_size):
             batch_end = min(batch_start + batch_size, len(crop_coords))
@@ -468,7 +468,7 @@ optimizer = optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-5)  # Added 
 scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, factor=0.5, verbose=True)
 
 # Training setup
-num_epochs = 25
+num_epochs = 50
 best_val_dice = 0.0
 patience = 25
 patience_counter = 0
