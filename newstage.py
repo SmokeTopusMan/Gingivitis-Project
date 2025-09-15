@@ -13,6 +13,18 @@ from albumentations.pytorch import ToTensorV2
 import segmentation_models_pytorch as smp
 from scipy.ndimage import gaussian_filter
 import matplotlib.pyplot as plt
+def is_pure_black_rgb(crop_rgb, thr=3, min_fraction=0.999):
+    """
+    Return True if at least `min_fraction` of pixels have all channels <= thr.
+    crop_rgb: HxWx3 uint8
+    thr: intensity threshold (0..255). 3 is tolerant to tiny noise.
+    """
+    if crop_rgb.ndim != 3 or crop_rgb.shape[2] != 3:
+        return False
+    # pixel is "black" if all channels <= thr
+    black_pixels = np.all(crop_rgb <= thr, axis=2)
+    frac_black = black_pixels.mean()
+    return frac_black >= min_fraction
 
 class SegmentationDataset(Dataset):
     def __init__(self, images_dir, masks_dir, transform=None):
@@ -155,61 +167,69 @@ def predict_large_image(image, model, device, crop_size=512, stride=128,
     # For crop-level Dice tracking
     crop_dice_scores = []
 
-    model.eval()
+        model.eval()
     with torch.no_grad():
-        # Process crops in batches
         for batch_start in range(0, len(crop_coords), batch_size):
             batch_end = min(batch_start + batch_size, len(crop_coords))
             batch_coords = crop_coords[batch_start:batch_end]
 
-            # Prepare batch
             batch_crops = []
             batch_gt_crops = []
+            batch_is_black = []   # <--- NEW
+
             for i, j in batch_coords:
                 crop = padded_img[i:i+crop_size, j:j+crop_size, :]
                 batch_crops.append(crop)
+                batch_is_black.append(is_pure_black_rgb(crop, thr=black_thr, min_fraction=black_min_fraction))
 
-                # Extract corresponding ground truth crop if available
                 if compute_crop_dice and padded_gt_mask is not None:
                     gt_crop = padded_gt_mask[i:i+crop_size, j:j+crop_size]
                     batch_gt_crops.append(gt_crop)
 
-            # Process base predictions
+            # Base predictions (unchanged)
             batch_predictions = process_crop_batch(batch_crops, model, device, base_transform, 'base')
 
-            # Process TTA if enabled
+            # TTA (unchanged)
             if use_tta:
                 tta_predictions = []
                 for tta_name, tta_transform in tta_transforms.items():
                     tta_pred = process_crop_batch(batch_crops, model, device, tta_transform, tta_name)
                     tta_predictions.append(tta_pred)
-
-                # Average TTA predictions
                 all_predictions = [batch_predictions] + tta_predictions
                 batch_predictions = np.mean(all_predictions, axis=0)
 
-            # Compute crop-level Dice scores if requested
+            # OPTIONAL: force predictions to negative on black crops
+            if force_black_pred:
+                for k, is_blk in enumerate(batch_is_black):
+                    if is_blk:
+                        batch_predictions[k].fill(0.0)
+
+            # Crop-level Dice (override GT to negative on black crops)
             if compute_crop_dice and batch_gt_crops:
                 for idx, (i, j) in enumerate(batch_coords):
                     pred_crop = batch_predictions[idx]
-                    gt_crop = batch_gt_crops[idx]
+                    gt_crop   = batch_gt_crops[idx]
 
-                    # Threshold prediction
                     pred_binary = (pred_crop > threshold).astype(np.float32)
-                    gt_binary = (gt_crop > 127).astype(np.float32)
 
-                    # Compute Dice for this crop
+                    if batch_is_black[idx]:
+                        # Treat black image crop as pure background in GT
+                        gt_binary = np.zeros_like(pred_binary, dtype=np.float32)
+                    else:
+                        gt_binary = (gt_crop > 127).astype(np.float32)
+
                     intersection = (pred_binary * gt_binary).sum()
                     union = pred_binary.sum() + gt_binary.sum()
-                    dice = (2. * intersection) / (union + 1e-7)
+                    dice = 1.0 if union == 0 else (2.0 * intersection) / (union + 1e-7)
 
                     crop_dice_scores.append({
                         'batch': batch_start // batch_size,
                         'crop_idx': batch_start + idx,
                         'position': (i, j),
                         'dice': dice,
-                        'mask_coverage': gt_binary.mean(),  # Fraction of crop that is mask
-                        'pred_coverage': pred_binary.mean()  # Fraction of crop predicted as mask
+                        'mask_coverage': gt_binary.mean(),
+                        'pred_coverage': pred_binary.mean(),
+                        'is_black_image_crop': bool(batch_is_black[idx]),
                     })
 
             # Accumulate predictions with weighting
