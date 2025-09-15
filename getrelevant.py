@@ -10,61 +10,56 @@ def create_image_in_dir(aug_img, img_name):
     cv2.imwrite(output_path_img, aug_img)
 
 def cut_to_the_chase_efficient(image_path, mask_path):
-    """Keep pixels close to white, black out pixels far from white"""
-    # Load images
-    image = cv2.imread(image_path)
-    mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-    
+    """
+    Keep pixels within 'cutcount' pixels of any white (255) pixel in the mask;
+    black out white pixels and non-white pixels farther than that.
+    Uses a distance transform instead of a huge dilation kernel,
+    preserving the same effective radius as the original code.
+    """
+    image = cv2.imread(image_path)  # BGR
+    mask  = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+
     if image is None or mask is None:
         print(f"Error: Could not load {image_path} or {mask_path}")
         return
-    
-    height, width = image.shape[:2]
-    cutcount = int(((width + height)) * 0.05)
-    
+
+    h, w = image.shape[:2]
+    # SAME radius as before (no cap)
+    cutcount = int((w + h) * 0.05)
+    if cutcount < 1:
+        cutcount = 1
+
     base_name = os.path.basename(image_path)
-    name, ext = os.path.splitext(base_name)
-    
-    # Create white pixel mask
+
     white_mask = (mask == 255)
-    
     if not np.any(white_mask):
         print(f"Warning: No white pixels found in {mask_path}")
         return
-    
-    # Use morphological dilation to find regions within cutcount distance of white pixels
-    kernel_size = int(2 * cutcount + 1)
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
-    
-    # Dilate white regions by cutcount distance
-    # This creates a mask of all pixels within cutcount distance of white pixels
-    close_to_white_mask = cv2.dilate(white_mask.astype(np.uint8), kernel, iterations=1).astype(bool)
-    
-    # Find pixels to black out:
-    # 1. All white pixels
-    # 2. Non-white pixels that are FAR from white pixels (outside the dilated region)
+
+    # Distance from each NON-WHITE pixel to the nearest WHITE pixel (Euclidean)
+    # Foreground = non-white (1), background = white (0)
+    non_white_u8 = (mask != 255).astype(np.uint8)
+    dist = cv2.distanceTransform(non_white_u8, cv2.DIST_L2, 3)
+
+    # Pixels farther than the radius are "far from white"
     non_white_mask = (mask != 255)
-    far_from_white_mask = non_white_mask & (~close_to_white_mask)
-    
-    # Combine: black out white pixels AND pixels far from white
+    far_from_white_mask = (dist > cutcount) & non_white_mask
+
+    # Black out all white pixels and all far non-white pixels
     pixels_to_black_out = white_mask | far_from_white_mask
-    
-    print(f"Blacking out {np.sum(white_mask)} white pixels")
-    print(f"Blacking out {np.sum(far_from_white_mask)} pixels far from white")
-    print(f"Total pixels to black out: {np.sum(pixels_to_black_out)}")
-    print(f"Keeping {np.sum(close_to_white_mask & non_white_mask)} non-white pixels close to white")
-    
-    # Apply blackout: black out white pixels AND pixels far from white
+
+    keep_count = np.sum(~pixels_to_black_out)
+    print(f"Keeping {keep_count} pixels; cutcount={cutcount} (h={h}, w={w})")
+
     result = image.copy()
     result[pixels_to_black_out] = [0, 0, 0]
-    
-    # Save the result
-    output_filename = f"{name}_relevant{ext}"
-    create_image_in_dir(result, output_filename)
-    
-    # Clean up
-    del image, mask, result, white_mask, close_to_white_mask, non_white_mask, far_from_white_mask
+
+    # Save as PNG (forced by create_image_in_dir)
+    create_image_in_dir(result, base_name)
+
+    del image, mask, result, white_mask, non_white_u8, dist, non_white_mask, far_from_white_mask
     gc.collect()
+
 
 def cut_to_the_chase_chunked(image_path, mask_path):
     """Alternative chunked version for exact distance calculations"""
@@ -190,3 +185,4 @@ def main():
 if __name__ == "__main__":
 
     main()
+
