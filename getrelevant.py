@@ -168,7 +168,7 @@ def main():
     
     for i, filename in enumerate(image_files, 1):
         file_path = os.path.join(sys.argv[1], filename)
-        file_mask_path = os.path.join(sys.argv[2], filename)
+        file_mask_path = os.path.join(sys.argv[2], os.path.splitext(filename)[0] + ".png")
         
         print(f"[{i}/{len(image_files)}] Processing {filename}...")
         
@@ -188,4 +188,5 @@ def main():
         gc.collect()
 
 if __name__ == "__main__":
+
     main()
