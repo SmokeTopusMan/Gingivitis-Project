@@ -1,8 +1,8 @@
-# make_crops_combo.py
+# make_crops_all_nonblack.py
 import cv2
 import os
 import sys
-import random
+import numpy as np
 
 def create_image_in_dir(aug_img, aug_mask, img_name, dest_root):
     out_img_dir = os.path.join(dest_root, "crops_images")
@@ -12,27 +12,28 @@ def create_image_in_dir(aug_img, aug_mask, img_name, dest_root):
     cv2.imwrite(os.path.join(out_img_dir, img_name), aug_img)
     cv2.imwrite(os.path.join(out_msk_dir, img_name), aug_mask)
 
-def make_crops_combo(
+def _grid_indices(L, win, stride, include_edge=True):
+    """Start indices for a sliding window of size 'win' with step 'stride'."""
+    xs = list(range(0, max(L - win + 1, 1), stride))
+    if include_edge and xs and xs[-1] != L - win:
+        xs.append(L - win)
+    if not xs:  # image smaller than window
+        xs = [0]
+    return xs
+
+def make_all_nonblack_crops(
     imgpath,
     maskpath,
     dest_root,
-    maxcorrelation=0.75,
     xsize=512,
     ysize=512,
-    target_pos=10,            # crops with objects in mask
-    target_pureblack=5,       # crops with (near) pure-black mask
-    pos_min_white=0.15,       # 15%..90% white pixels in mask
-    pos_max_white=0.90,
-    pureblack_max_white=0.05, # ≤5% white pixels in mask
-    max_attempts=100000
+    stride_x=None,           # default: half overlap
+    stride_y=None,
+    min_nonblack_frac=0.75,  # keep iff ≥75% non-black
+    black_thr=3,             # pixel is black if all channels ≤ thr
+    include_edges=True       # force last crop flush with right/bottom edges
 ):
-    """
-    Random crops with overlap control. Keeps only crops where the IMAGE crop
-    is not entirely black. Fills two buckets per image:
-      - positives (mask has objects: white ratio in [pos_min_white, pos_max_white])
-      - pureblack negatives (mask nearly empty: white ratio ≤ pureblack_max_white)
-    """
-    image = cv2.imread(imgpath)
+    image = cv2.imread(imgpath)                  # BGR
     mask  = cv2.imread(maskpath, cv2.IMREAD_GRAYSCALE)
 
     if image is None:
@@ -40,87 +41,49 @@ def make_crops_combo(
     if mask is None:
         raise FileNotFoundError(f"Could not read mask: {maskpath}")
 
-    h, w = image.shape[:2]
-    if w < xsize or h < ysize:
+    H, W = image.shape[:2]
+    if W < xsize or H < ysize:
         print(f"[!] Skipping {os.path.basename(imgpath)} (image smaller than crop size)")
-        return
+        return 0
+
+    if stride_x is None: stride_x = max(1, xsize // 2)
+    if stride_y is None: stride_y = max(1, ysize // 2)
 
     base = os.path.basename(imgpath)
     name, ext = os.path.splitext(base)
 
-    # Track accepted crop top-lefts to enforce overlap across BOTH buckets
-    accepted_coords = []
-    pos_coords = []
-    neg_coords = []
+    # Boolean map: True where pixel is NOT near-black (any channel > thr)
+    nonblack = np.any(image > black_thr, axis=2).astype(np.uint8)
 
-    attempts = 0
-    needed = lambda: (len(pos_coords) < target_pos) or (len(neg_coords) < target_pureblack)
+    # Integral image for O(1) window sums (shape: (H+1, W+1))
+    ii = cv2.integral(nonblack)  # int32/64
 
-    while needed() and attempts < max_attempts:
-        x = random.randint(0, w - xsize)
-        y = random.randint(0, h - ysize)
+    total_pix = xsize * ysize
+    min_nonblack_pix = int(np.ceil(min_nonblack_frac * total_pix))
 
-        # Overlap control (same as your style)
-        overlap = False
-        for xp, yp in accepted_coords:
-            if abs(x - xp) < maxcorrelation * xsize and abs(y - yp) < maxcorrelation * ysize:
-                overlap = True
-                break
-        if overlap:
-            attempts += 1
-            continue
+    xs = _grid_indices(W, xsize, stride_x, include_edge=include_edges)
+    ys = _grid_indices(H, ysize, stride_y, include_edge=include_edges)
 
-        # Crop image and mask
-        img_crop  = image[y:y+ysize, x:x+xsize]
-        mask_crop = mask[y:y+ysize, x:x+xsize]
+    written = 0
+    for y in ys:
+        y1, y2 = y, y + ysize
+        for x in xs:
+            x1, x2 = x, x + xsize
 
-        # 1) NEW RULE: image crop must NOT be all black
-        gray = cv2.cvtColor(img_crop, cv2.COLOR_BGR2GRAY)
-        if cv2.countNonZero(gray) == 0:
-            attempts += 1
-            continue
+            # Sum of non-black pixels in this window via integral image
+            s = int(ii[y2, x2] - ii[y1, x2] - ii[y2, x1] + ii[y1, x1])
+            if s >= min_nonblack_pix:
+                img_crop  = image[y1:y2, x1:x2]
+                mask_crop = mask[y1:y2, x1:x2]
+                create_image_in_dir(img_crop, mask_crop, f"{name}_nb_{written:05d}{ext}", dest_root)
+                written += 1
 
-        # 2) Classify by mask white ratio
-        white_pixels = cv2.countNonZero(mask_crop)
-        total_pixels = xsize * ysize
-        white_ratio = white_pixels / total_pixels
-
-        # Try to fill positives first if still needed and condition matches
-        placed = False
-        if len(pos_coords) < target_pos and (pos_min_white <= white_ratio <= pos_max_white):
-            pos_coords.append((x, y))
-            accepted_coords.append((x, y))
-            placed = True
-
-        # Otherwise try to fill pure-black bucket if condition matches
-        if (not placed) and len(neg_coords) < target_pureblack and (white_ratio <= pureblack_max_white):
-            neg_coords.append((x, y))
-            accepted_coords.append((x, y))
-            placed = True
-
-        # If it matches neither desired bucket (or the bucket is full), discard and continue
-        attempts += 1
-
-    # Write crops (keep names compact and collision-free)
-    idx = 0
-    for (x, y) in pos_coords:
-        img_crop  = image[y:y+ysize, x:x+xsize]
-        mask_crop = mask[y:y+ysize, x:x+xsize]
-        create_image_in_dir(img_crop, mask_crop, f"{name}_pos_{idx}{ext}", dest_root)
-        idx += 1
-
-    jdx = 0
-    for (x, y) in neg_coords:
-        img_crop  = image[y:y+ysize, x:x+xsize]
-        mask_crop = mask[y:y+ysize, x:x+xsize]
-        create_image_in_dir(img_crop, mask_crop, f"{name}_neg_{jdx}{ext}", dest_root)
-        jdx += 1
-
-    print(f"  -> {os.path.basename(imgpath)}: wrote {len(pos_coords)} pos, {len(neg_coords)} neg")
+    print(f"  -> {os.path.basename(imgpath)}: wrote {written} crops (≥{int(min_nonblack_frac*100)}% non-black)")
+    return written
 
 def main():
     if len(sys.argv) != 4:
-        print("Usage: python make_crops_combo.py pics_dir masks_dir dest_dir")
+        print("Usage: python make_crops_all_nonblack.py pics_dir masks_dir dest_dir")
         sys.exit(1)
 
     pics_dir, masks_dir, dest_dir = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -137,6 +100,7 @@ def main():
 
     print(f"Processing {len(files)} images...")
 
+    total = 0
     for i, filename in enumerate(files, 1):
         img_path  = os.path.join(pics_dir, filename)
         mask_path = os.path.join(masks_dir, filename)
@@ -147,22 +111,18 @@ def main():
 
         print(f"[{i}/{len(files)}] {filename}")
         try:
-            make_crops_combo(
-                img_path,
-                mask_path,
-                dest_root=dest_dir,
-                maxcorrelation=0.75,
-                xsize=512,
-                ysize=512,
-                target_pos=10,          # <- adjust per your dataset
-                target_pureblack=5,     # <- adjust per your dataset
-                pos_min_white=0.15,
-                pos_max_white=0.90,
-                pureblack_max_white=0.05,
-                max_attempts=100000
+            total += make_all_nonblack_crops(
+                img_path, mask_path, dest_root=dest_dir,
+                xsize=512, ysize=512,
+                stride_x=256, stride_y=256,       # 50% overlap; set to 1 for literal “all” positions
+                min_nonblack_frac=0.75,
+                black_thr=3,
+                include_edges=True
             )
         except Exception as e:
             print(f"[✗] Error {filename}: {e}")
+
+    print(f"Done. Wrote {total} crops.")
 
 if __name__ == "__main__":
     main()
