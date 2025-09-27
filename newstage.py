@@ -103,7 +103,9 @@ def process_crop_batch(crops, model, device, transform, transform_name='base'):
 def predict_large_image(image, model, device, crop_size=512, stride=128,
                        batch_size=4, threshold=0.5, use_tta=False,
                        use_gaussian_weights=True, compute_crop_dice=False,
-                       ground_truth_mask=None):
+                       ground_truth_mask=None,
+                       black_thr=3, black_min_fraction=0.999,
+                       force_black_pred=True):
     """
     Improved sliding window prediction with:
     - Batch processing for efficiency
@@ -111,6 +113,7 @@ def predict_large_image(image, model, device, crop_size=512, stride=128,
     - Test Time Augmentation (TTA) option
     - Memory-efficient processing
     - Optional crop-level Dice score computation
+    - Black crop handling with configurable threshold
     """
 
     image_np = np.array(image)
@@ -175,7 +178,7 @@ def predict_large_image(image, model, device, crop_size=512, stride=128,
 
             batch_crops = []
             batch_gt_crops = []
-            batch_is_black = []   # <--- NEW
+            batch_is_black = []
 
             for i, j in batch_coords:
                 crop = padded_img[i:i+crop_size, j:j+crop_size, :]
@@ -186,10 +189,10 @@ def predict_large_image(image, model, device, crop_size=512, stride=128,
                     gt_crop = padded_gt_mask[i:i+crop_size, j:j+crop_size]
                     batch_gt_crops.append(gt_crop)
 
-            # Base predictions (unchanged)
+            # Base predictions
             batch_predictions = process_crop_batch(batch_crops, model, device, base_transform, 'base')
 
-            # TTA (unchanged)
+            # TTA
             if use_tta:
                 tta_predictions = []
                 for tta_name, tta_transform in tta_transforms.items():
@@ -213,7 +216,6 @@ def predict_large_image(image, model, device, crop_size=512, stride=128,
                     pred_binary = (pred_crop > threshold).astype(np.float32)
 
                     if batch_is_black[idx]:
-                        # Treat black image crop as pure background in GT
                         gt_binary = np.zeros_like(pred_binary, dtype=np.float32)
                     else:
                         gt_binary = (gt_crop > 127).astype(np.float32)
@@ -235,11 +237,10 @@ def predict_large_image(image, model, device, crop_size=512, stride=128,
             # Accumulate predictions with weighting
             for idx, (i, j) in enumerate(batch_coords):
                 pred = batch_predictions[idx]
-
                 pred_sum[i:i+crop_size, j:j+crop_size] += pred * weight_map
                 weight_sum[i:i+crop_size, j:j+crop_size] += weight_map
 
-            # Print progress with crop Dice info
+            # Progress printing
             if (batch_start // batch_size + 1) % 10 == 0:
                 progress = (batch_end / len(crop_coords)) * 100
                 if compute_crop_dice and crop_dice_scores:
@@ -249,7 +250,7 @@ def predict_large_image(image, model, device, crop_size=512, stride=128,
                 else:
                     print(f"  Progress: {progress:.1f}%")
 
-    # Print crop Dice statistics if computed
+    # Crop Dice stats
     if compute_crop_dice and crop_dice_scores:
         dice_values = [c['dice'] for c in crop_dice_scores]
         print(f"\n  Crop-level statistics:")
@@ -257,15 +258,13 @@ def predict_large_image(image, model, device, crop_size=512, stride=128,
         print(f"    Dice scores - Mean: {np.mean(dice_values):.3f}, Std: {np.std(dice_values):.3f}")
         print(f"    Dice scores - Min: {np.min(dice_values):.3f}, Max: {np.max(dice_values):.3f}")
 
-        # Find best and worst performing crops
         best_crop = max(crop_dice_scores, key=lambda x: x['dice'])
         worst_crop = min(crop_dice_scores, key=lambda x: x['dice'])
         print(f"    Best crop: Dice={best_crop['dice']:.3f} at position {best_crop['position']}")
         print(f"    Worst crop: Dice={worst_crop['dice']:.3f} at position {worst_crop['position']}")
 
-        # Analyze by mask coverage
-        high_mask = [c for c in crop_dice_scores if c['mask_coverage'] > 0.1]  # >10% mask
-        low_mask = [c for c in crop_dice_scores if c['mask_coverage'] <= 0.01]  # ≤1% mask
+        high_mask = [c for c in crop_dice_scores if c['mask_coverage'] > 0.1]
+        low_mask = [c for c in crop_dice_scores if c['mask_coverage'] <= 0.01]
 
         if high_mask:
             high_mask_dice = np.mean([c['dice'] for c in high_mask])
@@ -275,7 +274,7 @@ def predict_large_image(image, model, device, crop_size=512, stride=128,
             low_mask_dice = np.mean([c['dice'] for c in low_mask])
             print(f"    Low mask crops (≤1% mask): {len(low_mask)} crops, avg Dice: {low_mask_dice:.3f}")
 
-    # Normalize by weights (avoid division by zero)
+    # Normalize by weights
     final_pred = np.divide(pred_sum, weight_sum, out=np.zeros_like(pred_sum), where=weight_sum!=0)
 
     # Apply threshold and crop to original size
