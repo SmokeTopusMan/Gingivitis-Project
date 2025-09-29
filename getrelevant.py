@@ -660,158 +660,38 @@ def _top_bottom_y_in_roi(wm_roi: np.ndarray):
     bot = _fill_nan_nearest(bot, H/2).astype(int)
     return top, bot
 
-def decide_side_by_hull_deficit(
-    white_mask,
-    comp,                                # CompSpan
-    rel_depth_top=0.09,                  # min top deficit (fraction of comp height)
-    rel_depth_bot=0.07,                  # min bottom deficit (fraction of comp height)
-    min_runs=3,                          # need ≥ this many jagged runs
-    min_coverage=0.10,                   # runs must cover ≥10% of width
-    run_close_frac=0.01,                 # close small gaps in runs
-    ignore_end_frac=0.10,                # ignore curved ends
-    thk_band_frac=0.35,                  # keep columns near median thickness
-    both_ratio=2.75,                     # when both active, require domination to choose one
-    loser_cov_thr=0.08                   # otherwise keep both
-):
+def hull_concavity_scores(white_mask, comp, band_frac=0.35, min_gap_h_frac=0.10):
     """
-    Compare columnwise convex-hull 'deficit' (inside-hull gap) at top and bottom.
-    Returns: decision ('top'|'bottom'|'both'), side_masks {'top','bottom'}, metrics dict.
+    Returns (#gap pixels near top, #gap pixels near bottom) measured on hull-mask
+    within the component bbox. band_frac = portion of height used as top/bottom bands.
+    Small gaps (height < min_gap_h_frac * comp height) are ignored.
     """
-    H, W = white_mask.shape
+    _, gaps = hull_hollow_masks(white_mask)  # hull \ white (bool)
+
+    y0, y1 = comp.getmin(), comp.getmax()
     x0, x1 = comp.getminx(), comp.getmaxx()
-    width  = max(1, x1 - x0 + 1)
-    Hc     = max(1, comp.yspan())
+    g = gaps[y0:y1+1, x0:x1+1].astype(np.uint8)
+    H, W = g.shape
+    if H == 0 or W == 0:
+        return 0, 0
 
-    wm = white_mask.astype(np.uint8)
+    # Remove tiny speckle gaps and require a minimum vertical extent
+    min_gap_h = max(3, int(min_gap_h_frac * H))
+    nlab, lab = cv2.connectedComponents(g, connectivity=8)
+    keep = np.zeros_like(g, dtype=np.uint8)
+    for i in range(1, nlab):
+        ys, xs = np.where(lab == i)
+        if ys.size == 0: 
+            continue
+        if (ys.max() - ys.min() + 1) >= min_gap_h:
+            keep[ys, xs] = 1
+    g = keep.astype(bool)
 
-    # ---- Convex hull mask (over all external contours) ----
-    cnts, _ = cv2.findContours(wm, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not cnts:
-        # fallback: keep both
-        Y = np.arange(H)[:, None]
-        tmask = Y < (H//2)
-        bmask = ~tmask
-        return 'both', dict(top=tmask, bottom=bmask), dict(err="no contours")
+    band = max(1, int(band_frac * H))
+    top_band = np.zeros_like(g, bool);  top_band[:band, :]  = True
+    bot_band = np.zeros_like(g, bool);  bot_band[-band:, :] = True
 
-    pts = np.vstack(cnts)
-    hull = cv2.convexHull(pts)
-    hull_mask = np.zeros_like(wm)
-    cv2.fillConvexPoly(hull_mask, hull, 1)
-    hull_mask = hull_mask.astype(bool)
-
-    # ---- columnwise top/bottom for white and hull ----
-    has_col_w = white_mask.any(axis=0)
-    has_col_h = hull_mask.any(axis=0)
-
-    top_w = np.full(W, np.nan, float)
-    bot_w = np.full(W, np.nan, float)
-    top_h = np.full(W, np.nan, float)
-    bot_h = np.full(W, np.nan, float)
-
-    first_w = np.argmax(white_mask, axis=0)
-    rev_w   = np.argmax(np.flipud(white_mask), axis=0)
-    top_w[has_col_w] = first_w[has_col_w]
-    bot_w[has_col_w] = (H-1) - rev_w[has_col_w]
-
-    first_h = np.argmax(hull_mask, axis=0)
-    rev_h   = np.argmax(np.flipud(hull_mask), axis=0)
-    top_h[has_col_h] = first_h[has_col_h]
-    bot_h[has_col_h] = (H-1) - rev_h[has_col_h]
-
-    # nearest-neighbor fill for NaNs
-    def _fill(a, fill):
-        x = np.arange(a.size); m = ~np.isnan(a)
-        if m.sum() == 0:  return np.full_like(a, fill, float)
-        if m.sum() == 1:  return np.full_like(a, a[m][0], float)
-        return np.interp(x, x[m], a[m])
-
-    top_w = _fill(top_w, H/2); bot_w = _fill(bot_w, H/2)
-    top_h = _fill(top_h, H/2); bot_h = _fill(bot_h, H/2)
-
-    # ---- core columns (ignore ends and odd thickness) ----
-    thk     = bot_w - top_w
-    med_thk = np.median(thk[x0:x1+1])
-    thk_ok  = np.abs(thk - med_thk) <= thk_band_frac * max(1.0, med_thk)
-
-    margin  = int(ignore_end_frac * width)
-    span_ok = np.zeros(W, bool)
-    span_ok[max(x0+margin,0):min(x1-margin,W-1)+1] = True
-
-    core = thk_ok & span_ok
-
-    # ---- convex deficit depths (inside hull but outside white) ----
-    # Top deficit = how much hull extends above white (larger => jaggier top)
-    # Bottom deficit = how much hull extends below white (larger => jaggier bottom)
-    depth_top = np.maximum(0.0, top_w - top_h)   # non-negative
-    depth_bot = np.maximum(0.0, bot_h - bot_w)
-
-    # thresholds in pixels
-    dthr_top = max(2.0, rel_depth_top * Hc)
-    dthr_bot = max(2.0, rel_depth_bot * Hc)
-
-    jag_top = (depth_top >= dthr_top) & core
-    jag_bot = (depth_bot >= dthr_bot) & core
-
-    # merge tiny gaps in runs
-    k_close = max(1, int(run_close_frac * width))
-    if k_close > 0:
-        kernel = np.ones((1, 2*k_close+1), np.uint8)
-        jag_top = cv2.morphologyEx(jag_top.astype(np.uint8)[None,:],
-                                   cv2.MORPH_CLOSE, kernel, 1)[0].astype(bool)
-        jag_bot = cv2.morphologyEx(jag_bot.astype(np.uint8)[None,:],
-                                   cv2.MORPH_CLOSE, kernel, 1)[0].astype(bool)
-
-    # count runs + coverage + mean depth score
-    def runs_stats(b, depth):
-        if not b.any(): return 0, 0.0, 0.0
-        edges = np.diff(np.concatenate([[0], b.view(np.int8), [0]]))
-        starts = np.where(edges==1)[0]
-        ends   = np.where(edges==-1)[0] - 1
-        lens   = ends - starts + 1
-        good   = lens >= 1
-        n_runs = int(good.sum())
-        covered = int(lens[good].sum())
-        cov = covered / float(max(1, width))
-        sel = np.zeros_like(b, bool)
-        for s,e in zip(starts[good], ends[good]): sel[s:e+1] = True
-        md = float((depth[sel] / max(1.0, Hc)).mean()) if sel.any() else 0.0
-        score = cov * n_runs * md
-        return n_runs, cov, score
-
-    nT, covT, scoreT = runs_stats(jag_top, depth_top)
-    nB, covB, scoreB = runs_stats(jag_bot, depth_bot)
-
-    top_pass    = (nT >= min_runs and covT >= min_coverage)
-    bottom_pass = (nB >= min_runs and covB >= min_coverage)
-
-    # masks to apply later
-    Y = np.arange(H)[:, None]
-    top_mask    = (Y <  top_w[None,:])
-    bottom_mask = (Y >  bot_w[None,:])
-
-    # ---- decision (favor both unless one truly dominates) ----
-    if top_pass and bottom_pass:
-        big, small = (('top',scoreT,covT,nT), ('bottom',scoreB,covB,nB)) if scoreT >= scoreB \
-                     else (('bottom',scoreB,covB,nB), ('top',scoreT,covT,nT))
-        if big[1] >= both_ratio * max(1e-6, small[1]) and (small[2] < loser_cov_thr or small[3] < 2):
-            decision = big[0]
-        else:
-            decision = 'both'
-    elif bottom_pass:
-        decision = 'bottom'
-    elif top_pass:
-        decision = 'top'
-    else:
-        decision = 'both'
-
-    metrics = dict(
-        nTop=nT, covTop=covT, scoreTop=scoreT,
-        nBot=nB, covBot=covB, scoreBot=scoreB,
-        dthr_top=dthr_top, dthr_bot=dthr_bot,
-        med_thk=float(med_thk), ignored_margin_px=margin
-    )
-    return decision, dict(top=top_mask.astype(bool), bottom=bottom_mask.astype(bool)), metrics
-
+    return int(np.sum(g & top_band)), int(np.sum(g & bot_band))
 
 
 def cut_to_the_chase_efficient(image_path, mask_path):
@@ -892,19 +772,38 @@ def cut_to_the_chase_efficient(image_path, mask_path):
             pixels_to_black_out = ~inner_hollow | extra_black   # <— keep band blackout
         else:
             near_bg = (~white_mask) & (dist <= cutcount)
+            comp = components[0]
+            top_cvx, bot_cvx = hull_concavity_scores(
+    white_mask, comp, band_frac=0.35, min_gap_h_frac=0.10
+)
 
-            decision, sides, met = decide_side_by_hull_deficit(white_mask, components[0])
+            tau_area = max(50, int(0.002 * comp.xspan() * comp.yspan()))  # small safety floor
+            close=0.2
+            picked =None
+            if max(top_cvx, bot_cvx) >= tau_area:
+                if abs(top_cvx - bot_cvx) <= close * max(top_cvx, bot_cvx):
+                    picked = 'both'
+                else:
+                    picked = 'top' if top_cvx > bot_cvx else 'bottom'
 
+            if picked is None:
+                decision, sides, _ = decide_sides_by_nonsmoothness(
+        white_mask, comp, abs_thr_px=3.0, rel_thr_to_height=0.02, smooth_k=15
+    )
+                picked = decision  # 'top' | 'bottom' | 'both' | 'none'
 
-            if decision == 'both':
+# 3) build the mask to keep
+            if picked == 'both' or picked == 'none':          # keep both when tie/none
                 chosen_bg = near_bg
-            elif decision == 'top':
-                chosen_bg = near_bg & sides['top']
-            else:  # 'bottom'
-                chosen_bg = near_bg & sides['bottom']
+            elif picked == 'top':
+                top_mask, _, _ = row_side_flatness_masks(white_mask)
+                chosen_bg = near_bg & top_mask
+            elif picked == 'bottom':
+                _, bot_mask, _ = row_side_flatness_masks(white_mask)
+                chosen_bg = near_bg & bot_mask
 
             pixels_to_black_out = ~chosen_bg | extra_black
-
+            
     keep_count = np.sum(~pixels_to_black_out)
     print(f"Keeping {keep_count} pixels; cutcount={cutcount} (h={h}, w={w})")
 
