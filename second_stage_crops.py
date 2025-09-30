@@ -29,7 +29,7 @@ def make_all_nonblack_crops(
     ysize=512,
     stride_x=None,           # default: half overlap
     stride_y=None,
-    min_nonblack_frac=0.66,  # keep iff ≥75% non-black
+    min_nonblack_frac=0.5,  # keep iff ≥75% non-black
     black_thr=3,             # pixel is black if all channels ≤ thr
     include_edges=True       # force last crop flush with right/bottom edges
 ):
