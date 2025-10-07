@@ -493,6 +493,8 @@ def setup_dist():
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     torch.cuda.set_device(local_rank)
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
     dist.init_process_group(backend="nccl", init_method="env://",
                             world_size=world_size, rank=rank)
     return rank, local_rank, world_size
