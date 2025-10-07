@@ -17,4 +17,4 @@
    config.json
    *.log
    
-   /images
+   images/
