@@ -1,20 +1,20 @@
 # Python
-   __pycache__/
-   *.pyc
-   *.pyo
-   .env
-   venv/
-   
-   # IDEs
-   .vscode/
-   .idea/
-   
-   # OS files
-   .DS_Store
-   Thumbs.db
-   
-   # Specific files
-   config.json
-   *.log
-   
-   images/
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/
+
+# IDEs
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Specific files
+config.json
+*.log
+
+images/
