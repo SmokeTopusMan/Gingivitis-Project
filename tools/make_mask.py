@@ -99,9 +99,17 @@ def yolo_generate_masks(image_dir, label_dir, output_dir):
 
 
 def main():
-    if len(sys.argv) != 2:
-        print("Usage: python make_mask.py directory")
+    if len(sys.argv) != 2 and len(sys.argv) != 3:
+        print("Usage: python make_mask.py directory [index]")
         sys.exit(1)
+
+    starting_index = 1
+    if len(sys.argv) == 3:
+        try:
+            starting_index = int(sys.argv[2])
+        except ValueError:
+            print("Invalid number format")
+            sys.exit(1)
 
     if not os.path.isdir(sys.argv[1]):
         print(f"Error: {sys.argv[1]} is not a valid directory.")
@@ -110,8 +118,8 @@ def main():
     image_dir = os.path.join(sys.argv[1], "images")
     label_dir = os.path.join(sys.argv[1], "labels")
     output_dir = os.path.join(sys.argv[1], "masks")
-    rename_images_in_directory(image_dir, 404)
-    rename_images_in_directory(label_dir, 404)
+    rename_images_in_directory(image_dir, starting_index)
+    rename_images_in_directory(label_dir, starting_index)
     yolo_generate_masks(image_dir, label_dir, output_dir)
 
 
