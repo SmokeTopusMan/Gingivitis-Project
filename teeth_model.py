@@ -1,4 +1,5 @@
 import os
+import sys
 import numpy as np
 import torch
 import torch.nn as nn
@@ -381,6 +382,22 @@ def plot_training_history(train_losses, val_losses, train_dice_scores, val_dice_
     plt.savefig('training_history.png', dpi=300, bbox_inches='tight')
     plt.show()
 
+
+
+
+train_directory = ""
+test_directory = ""
+if len(sys.argv) != 3:
+    print("Usage: python teeth_model.py train_directory test_directory")
+    sys.exit(1)
+else:
+    train_directory = sys.argv[1]
+    test_directory = sys.argv[1]
+
+
+
+
+
 # Check GPU availability and set device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -394,7 +411,8 @@ if torch.cuda.is_available():
     print("✓ GPU computation test passed")
     del test_tensor, result
 else:
-    print("my life is shit")
+    print("GPU not functional")
+    sys.exit(1)
 # Model setup
 model = smp.UnetPlusPlus(
     encoder_name="resnet34",        # can be 'efficientnet-b0', etc.
@@ -420,7 +438,9 @@ val_transform = A.Compose([
 ], additional_targets={"mask": "mask"})
 
 # Create full dataset
-full_dataset = SegmentationDataset("dataset/images", "dataset/masks", train_transform)
+full_dataset = SegmentationDataset(os.path.join(train_directory, "images"),
+                                   os.path.join(train_directory, "masks"),
+                                   train_transform)
 
 # Split dataset into train and validation (80/20 split)
 train_size = int(0.8 * len(full_dataset))
@@ -431,7 +451,10 @@ print(f"Dataset split: {train_size} training, {val_size} validation")
 train_dataset, val_indices = random_split(full_dataset, [train_size, val_size])
 
 # Create validation dataset with different transform
-val_dataset = SegmentationDataset("dataset/images", "dataset/masks", val_transform)
+val_dataset = SegmentationDataset(os.path.join(train_directory, "images"),
+                                  os.path.join(train_directory, "masks"),
+                                  val_transform)
+
 val_dataset.images = [full_dataset.images[i] for i in val_indices.indices]
 
 # Data loaders
@@ -445,10 +468,10 @@ val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False,
 model = model.to(device)
 loss_fn = smp.losses.DiceLoss("binary")
 optimizer = optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-5)  # Added weight decay
-scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, factor=0.5, verbose=True)
+scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, factor=0.5)
 
 # Training setup
-num_epochs = 25
+num_epochs = 1
 best_val_dice = 0.0
 patience = 25
 patience_counter = 0
@@ -615,7 +638,8 @@ class TestDatasetOriginalSize(Dataset):
         return image, mask, img_name
 
 # Create dataset but iterate directly (no DataLoader to avoid PIL Image batching issues)
-test_dataset = TestDatasetOriginalSize("dataset/test", "dataset/test_mask")
+test_dataset = TestDatasetOriginalSize(os.path.join(test_directory, "images"),
+                                       os.path.join(test_directory, "masks"))
 
 print(f"Test dataset created with {len(test_dataset)} images (original sizes preserved)")
 
