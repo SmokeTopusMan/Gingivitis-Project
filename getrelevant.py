@@ -12,29 +12,8 @@ import numpy as np
 
 from typing import Optional, Tuple, Iterable
 import numpy as np
-class _YSpanComp:
-    def __init__(self, miny, maxy):
-        self._minY = int(miny)
-        self._maxY = int(maxy)
-    def getmin(self): return self._minY
-    def getmax(self): return self._maxY
 
-def components_from_mask(white_mask: np.ndarray, connectivity: int = 8):
-    """
-    Pure adjacency-based components (no Y-level merging, no tolerances).
-    Returns a list of CompSpan objects, one per connected component in 'white_mask'.
-    """
-    m = (white_mask.astype(np.uint8) > 0).astype(np.uint8)
-    num, _, stats, _ = cv2.connectedComponentsWithStats(m, connectivity=connectivity)
 
-    comps = []
-    for lab in range(1, num):  # 0 is background
-        x = int(stats[lab, cv2.CC_STAT_LEFT])
-        y = int(stats[lab, cv2.CC_STAT_TOP])
-        w = int(stats[lab, cv2.CC_STAT_WIDTH])
-        h = int(stats[lab, cv2.CC_STAT_HEIGHT])
-        comps.append(CompSpan(y, y + h - 1, x, x + w - 1))
-    return comps
 
 def row_side_flatness_masks(white_mask, smooth_k=15):
     """
@@ -347,11 +326,13 @@ def components_from_mask(
     connectivity: int = 8,
     y_connect: bool = True,     # <-- enable y-level connectivity
     y_gap: int = 0,             # rows of tolerance when merging (e.g. 0–3)
-    bridge_px: int = 0          # optional closing to bridge tiny cracks first
+    bridge_px: int = 0,         # optional closing to bridge tiny cracks first
+    min_area_frac: float = 0.01 # <-- NEW: drop comps smaller than 1% of image
 ):
     """
     Returns components with X/Y spans. If y_connect=True, components whose
     [miny,maxy] intervals overlap (within y_gap) are merged into one.
+    Components with pixel area < (min_area_frac * H * W) are ignored.
     """
     m = white_mask.astype(np.uint8)
 
@@ -362,8 +343,15 @@ def components_from_mask(
 
     num, _, stats, _ = cv2.connectedComponentsWithStats(m, connectivity=connectivity)
 
+    H, W = m.shape
+    min_area = max(1, int(min_area_frac * H * W))
+
     comps = []
     for lab in range(1, num):  # 0 is background
+        area = int(stats[lab, cv2.CC_STAT_AREA])
+        if area < min_area:
+            continue  # skip tiny component
+
         x = int(stats[lab, cv2.CC_STAT_LEFT])
         y = int(stats[lab, cv2.CC_STAT_TOP])
         w = int(stats[lab, cv2.CC_STAT_WIDTH])
@@ -376,13 +364,12 @@ def components_from_mask(
     # ---- Y-level merge (interval union with tolerance y_gap) ----
     comps.sort(key=lambda t: t[0])            # sort by miny
     merged = []
-    cur = comps[0]                            # [miny, maxy, minx, maxx]
+    cur = comps[0]
     for ny0, ny1, nx0, nx1 in comps[1:]:
-        # overlap/touch in Y within tolerance?
         if ny0 <= cur[1] + y_gap:
-            cur[1] = max(cur[1], ny1)        # expand Y
-            cur[2] = min(cur[2], nx0)        # expand X left
-            cur[3] = max(cur[3], nx1)        # expand X right
+            cur[1] = max(cur[1], ny1)
+            cur[2] = min(cur[2], nx0)
+            cur[3] = max(cur[3], nx1)
         else:
             merged.append(cur)
             cur = [ny0, ny1, nx0, nx1]
@@ -725,7 +712,8 @@ def cut_to_the_chase_efficient(image_path, mask_path):
         print(f"[split] splitting on row y={split_y}")
 
 # Components: adjacency only
-    components = components_from_mask(white_mask_for_cc, connectivity=8)
+    components = components_from_mask(white_mask_for_cc, connectivity=8, min_area_frac=0.01)
+
     print(f"Found {len(components)} components")
 
     non_white_mask = ~white_mask
@@ -766,7 +754,7 @@ def cut_to_the_chase_efficient(image_path, mask_path):
 # ---------- Single-component logic ----------
     if len(components) == 1:
         comp = components[0]
-        if (comp.yspan()/max(1, comp.xspan())) >= 0.50:
+        if False:
             inner_centroid_hollow, all_hull_gaps = hull_hollow_masks(white_mask)
             inner_hollow = (inner_centroid_hollow | all_hull_gaps) & (dist <= cutcount)
             pixels_to_black_out = ~inner_hollow | extra_black   # <— keep band blackout
@@ -787,9 +775,8 @@ def cut_to_the_chase_efficient(image_path, mask_path):
                     picked = 'top' if top_cvx > bot_cvx else 'bottom'
 
             if picked is None:
-                decision, sides, _ = decide_sides_by_nonsmoothness(
-        white_mask, comp, abs_thr_px=3.0, rel_thr_to_height=0.02, smooth_k=15
-    )
+                picked = 'both'
+    
                 picked = decision  # 'top' | 'bottom' | 'both' | 'none'
 
 # 3) build the mask to keep
@@ -817,7 +804,8 @@ def cut_to_the_chase_efficient(image_path, mask_path):
     gc.collect()
 
 
-
+IMAGE_EXTS  = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
+ALLOWED_EXTS = IMAGE_EXTS
 
 def find_mask_path(masks_dir: str, image_filename: str) -> Optional[str]:
     stem = os.path.splitext(os.path.basename(image_filename))[0].lower()
