@@ -241,12 +241,11 @@ class TestDatasetOriginalSize(Dataset):
 # Main: load model, run evaluation
 # -----------------------------
 def main():
-    if len(sys.argv) != 3:
-        print("Usage: python test_only_teeth_model.py <train_directory> <test_directory>")
+    if len(sys.argv) != 2:
+        print("Usage: python test_only_teeth_model.py <test_directory>")
         sys.exit(1)
 
-    train_directory = sys.argv[1]
-    test_directory  = sys.argv[2]  # <-- fixed: was sys.argv[1] before
+    test_directory  = sys.argv[1]  # <-- fixed: was sys.argv[1] before
 
     # Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -268,7 +267,10 @@ def main():
     if not os.path.isfile(ckpt_path):
         print(f"Checkpoint not found at {ckpt_path}")
         sys.exit(1)
-    model.load_state_dict(torch.load(ckpt_path, map_location=device))
+    state_dict = torch.load(ckpt_path, map_location=device)
+    # Remove 'module.' prefix from all keys
+    state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+    model.load_state_dict(state_dict)
     model.eval()
     print("Loaded checkpoint: best_model.pth")
 

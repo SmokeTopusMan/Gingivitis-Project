@@ -392,7 +392,7 @@ if len(sys.argv) != 3:
     sys.exit(1)
 else:
     train_directory = sys.argv[1]
-    test_directory = sys.argv[1]
+    test_directory = sys.argv[2]
 
 
 
