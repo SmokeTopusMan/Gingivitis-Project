@@ -85,49 +85,7 @@ def _moving_average(a, k=15):
     kernel = np.ones(k, dtype=float)/k
     return np.convolve(a_pad, kernel, mode='valid')
 
-def row_side_mask_from_straightness(white_mask):
-    """
-    white_mask: bool array (H,W). Returns:
-      side  : 'top' or 'bottom' (less-straight boundary)
-      side_mask: bool (H,W) True on the chosen side of the component
-    Assumes the row is roughly horizontal. (For large rotations, rotate by PCA first.)
-    """
-    H, W = white_mask.shape
-    has_col = white_mask.any(axis=0)
 
-    # top_y[x] = smallest y with white at column x; bottom_y[x] = largest y
-    top_y = np.full(W, np.nan, dtype=float)
-    bottom_y = np.full(W, np.nan, dtype=float)
-    # top: first True index
-    first_idx = np.argmax(white_mask, axis=0)  # 0 if none; guard with has_col
-    top_y[has_col] = first_idx[has_col]
-    # bottom: last True index
-    rev_first = np.argmax(np.flipud(white_mask), axis=0)
-    bottom_y[has_col] = (H - 1) - rev_first[has_col]
-
-    # fill gaps and smooth a bit
-    top_y    = _fill_nan_nearest(top_y, H/2)
-    bottom_y = _fill_nan_nearest(bottom_y, H/2)
-    top_y    = _moving_average(top_y, k=15)
-    bottom_y = _moving_average(bottom_y, k=15)
-
-    # straightness = residual std after best straight-line fit
-    xs = np.arange(W, dtype=float)
-    At = np.vstack([xs, np.ones_like(xs)]).T
-    ab_t, *_ = np.linalg.lstsq(At, top_y, rcond=None)
-    ab_b, *_ = np.linalg.lstsq(At, bottom_y, rcond=None)
-    std_top = np.std(top_y    - (ab_t[0]*xs + ab_t[1]))
-    std_bot = np.std(bottom_y - (ab_b[0]*xs + ab_b[1]))
-
-    side = 'top' if std_top > std_bot else 'bottom'
-
-    Y = np.arange(H)[:, None]  # (H,1)
-    if side == 'top':
-        side_mask = (Y < top_y[None, :])
-    else:
-        side_mask = (Y > bottom_y[None, :])
-
-    return side, side_mask.astype(bool)
 def hull_hollow_masks(white_mask: np.ndarray):
     """
     white_mask: bool or 0/1, shape (H,W). True/1 = white (teeth).
@@ -170,125 +128,11 @@ def hull_hollow_masks(white_mask: np.ndarray):
 
     return inner_centroid_hollow.astype(bool), all_hull_gaps.astype(bool)
 
-class WhiteSet:
-    """
-    A set of white pixels stored as (y, x) coordinates.
-    _pixels: np.ndarray of shape (N, 2), dtype=int32
-    """
-
-    def __init__(
-        self,
-        pixels: Optional[np.ndarray] = None,
-        pixel1: Optional[Tuple[int, int]] = None
-    ):
-        if pixels is None:
-            pixels = np.empty((0, 2), dtype=np.int32)
-
-        if pixel1 is not None:
-            p = np.array([[int(pixel1[0]), int(pixel1[1])]], dtype=np.int32)
-            pixels = np.vstack([pixels.astype(np.int32, copy=False), p])
-
-        pixels = pixels.astype(np.int32, copy=False)
-        if pixels.size > 0:
-            pixels = np.unique(pixels, axis=0)
-
-        self._pixels = pixels
-        self._recompute_bounds()
-
-    # ----- getters -----
-    def getmax(self) -> Optional[int]:
-        return self._maxY
-
-    def getmin(self) -> Optional[int]:
-        return self._minY
-
-    def getpixels(self) -> np.ndarray:
-        return self._pixels
-
-    # ----- helpers -----
-    def is_empty(self) -> bool:
-        return self._pixels.size == 0
-
-    def _recompute_bounds(self) -> None:
-        if self._pixels.size == 0:
-            self._minY, self._maxY = None, None
-        else:
-            self._minY = int(self._pixels[:, 0].min())
-            self._maxY = int(self._pixels[:, 0].max())
-
-    def kill(self) -> None:
-        self._pixels = np.empty((0, 2), dtype=np.int32)
-        self._recompute_bounds()
-
-    def add_pixels(self, coords: Iterable[Tuple[int, int]]) -> None:
-        """Add many (y, x) pixels to the set."""
-        coords = list(coords)
-        if not coords:
-            return
-        to_add = np.array(coords, dtype=np.int32).reshape(-1, 2)
-        if self._pixels.size == 0:
-            self._pixels = np.unique(to_add, axis=0)
-        else:
-            self._pixels = np.unique(np.vstack([self._pixels, to_add]), axis=0)
-        self._recompute_bounds()
-
-    def Unite(self, setTwo: "WhiteSet", connectivity: int = 8, same_row_merge: bool = True) -> bool:
-        """
-        Merge setTwo into self if they touch (4/8-connectivity) OR (optionally) share any y-row.
-        Returns True if a merge happened.
-        """
-        if setTwo.is_empty():
-            return False
-        if self.is_empty():
-            # adopt setTwo
-            self._pixels = setTwo._pixels.copy()
-            self._recompute_bounds()
-            setTwo.kill()
-            return True
-
-        # Optional fast-path: merge if any row (y) is shared
-        if same_row_merge:
-            if len(set(self._pixels[:, 0]).intersection(set(setTwo._pixels[:, 0]))) > 0:
-                merged = np.vstack([self._pixels, setTwo._pixels])
-                self._pixels = np.unique(merged, axis=0)
-                self._recompute_bounds()
-                setTwo.kill()
-                return True
-
-        # Adjacency test
-        other_set = set(map(tuple, setTwo._pixels.tolist()))
-        if connectivity == 4:
-            nbrs = [(1,0), (-1,0), (0,1), (0,-1)]
-        elif connectivity == 8:
-            nbrs = [(1,0), (-1,0), (0,1), (0,-1), (1,1), (1,-1), (-1,1), (-1,-1)]
-        else:
-            raise ValueError("connectivity must be 4 or 8")
-
-        touches = False
-        for (y, x) in self._pixels:
-            if (y, x) in other_set:
-                touches = True
-                break
-            for dy, dx in nbrs:
-                if (y + dy, x + dx) in other_set:
-                    touches = True
-                    break
-            if touches:
-                break
-
-        if not touches:
-            return False
-
-        merged = np.vstack([self._pixels, setTwo._pixels])
-        self._pixels = np.unique(merged, axis=0)
-        self._recompute_bounds()
-        setTwo.kill()
-        return True
-
 def create_image_in_dir(aug_img, img_name):
     output_dir = os.path.join(sys.argv[3], "relevant_images")
     output_path_img = os.path.join(output_dir, img_name)
     cv2.imwrite(output_path_img, aug_img)
+
 def binarize_mask(mask_gray: np.ndarray, use_otsu: bool = True, thr: int = 128) -> np.ndarray:
     """
     Return boolean mask where True means 'white object'.
@@ -305,11 +149,7 @@ def ensure_object_is_white(white_mask: np.ndarray) -> np.ndarray:
     # Auto invert if most of the image is "white"
     return ~white_mask if white_mask.mean() > 0.6 else white_mask
 
-class _YSpanComp:
-    def __init__(self, miny, maxy):
-        self._minY = int(miny); self._maxY = int(maxy)
-    def getmin(self): return self._minY
-    def getmax(self): return self._maxY
+
 class CompSpan:
     def __init__(self, miny, maxy, minx, maxx):
         self._minY, self._maxY = int(miny), int(maxy)
@@ -378,30 +218,7 @@ def components_from_mask(
     return [CompSpan(a, b, c, d) for (a, b, c, d) in merged]
 
 
-def near_background_via_dt(white_mask: np.ndarray, cutcount: int) -> np.ndarray:
-    """
-    Returns boolean mask of non-white pixels within 'cutcount' pixels of white.
-    Fast: computes DT only in an ROI around the whites.
-    """
-    H, W = white_mask.shape
-    ys, xs = np.where(white_mask)
-    if ys.size == 0:
-        return np.zeros((H, W), dtype=bool)
 
-    pad = int(cutcount) + 2
-    y0 = max(0, ys.min() - pad); y1 = min(H, ys.max() + pad + 1)
-    x0 = max(0, xs.min() - pad); x1 = min(W, xs.max() + pad + 1)
-    roi = (slice(y0, y1), slice(x0, x1))
-
-    # DT expects 1=foreground, 0=background; we want distance from non-white to white
-    inv_roi = (~white_mask[roi]).astype(np.uint8)  # 1 where non-white
-    # Distance to nearest 0 (white) in the ROI
-    dist_roi = cv2.distanceTransform(inv_roi, cv2.DIST_L2, 3)
-
-    near = np.zeros((H, W), dtype=bool)
-    # within radius AND actually non-white
-    near[roi] = (dist_roi <= cutcount) & (~white_mask[roi])
-    return near
 def split_mask_if_row_bridge(white_mask: np.ndarray,
                              width_frac: float = 0.10,
                              both_frac: float = 0.50) -> tuple[np.ndarray, Optional[int]]:
@@ -520,132 +337,12 @@ def middle_band_by_row_test(white_mask: np.ndarray,
     return band, (top, bot)
 
 
-# --- helpers ---------------------------------------------------------------
-def _moving_average(a, k=31):
-    if k <= 1: return a
-    k = int(max(1, k))
-    pad = k // 2
-    ap = np.pad(a, (pad, pad), mode='edge')
-    return np.convolve(ap, np.ones(k)/k, mode='valid')
 
-def _fill_nan_nearest(a, fill):
-    x = np.arange(a.size)
-    m = ~np.isnan(a)
-    if m.sum() == 0:  return np.full_like(a, fill, float)
-    if m.sum() == 1:  return np.full_like(a, a[m][0], float)
-    return np.interp(x, x[m], a[m])
 
-def _top_bottom_y_arrays(white_mask: np.ndarray):
-    H, W = white_mask.shape
-    has = white_mask.any(axis=0)
 
-    top = np.full(W, np.nan, float)
-    bot = np.full(W, np.nan, float)
 
-    first = np.argmax(white_mask, axis=0)
-    top[has] = first[has]
-    rev_first = np.argmax(white_mask[::-1, :], axis=0)
-    bot[has] = (H-1) - rev_first[has]
 
-    top = _fill_nan_nearest(top, H/2)
-    bot = _fill_nan_nearest(bot, H/2)
-    return top, bot
 
-# --- jaggedness of a 1D edge profile y(x) ---
-def _top_bottom_y_in_roi(wm_roi: np.ndarray, H: int):
-    """top_y, bot_y for a ROI (H x Wc) boolean mask."""
-    has = wm_roi.any(axis=0)
-    Wc = wm_roi.shape[1]
-    top = np.full(Wc, np.nan, float)
-    bot = np.full(Wc, np.nan, float)
-
-    first = np.argmax(wm_roi, axis=0)
-    top[has] = first[has]
-    rev_first = np.argmax(wm_roi[::-1, :], axis=0)
-    bot[has] = (H - 1) - rev_first[has]
-    # fill tiny gaps so we can do math on all columns
-    top = _fill_nan_nearest(top, H/2)
-    bot = _fill_nan_nearest(bot, H/2)
-    return top.astype(int), bot.astype(int)
-
-def _max_contiguous_true(run_bool: np.ndarray) -> int:
-    """length of the longest contiguous True run in a 1D bool array."""
-    best = cur = 0
-    for v in run_bool:
-        if v:
-            cur += 1
-            if cur > best: best = cur
-        else:
-            cur = 0
-    return best
-
-def side_has_deep_jagged_runs(
-    white_mask: np.ndarray,
-    comp,                          # CompSpan
-    side: str,                     # 'top' or 'bottom'
-    min_run_cols: int = 1,         # “more than 3 contiguous” => ≥4 columns
-    min_height_frac: float = 1/4.0 # height ≥ 1/3 component height
-):
-    """
-    Implements your jaggedness rule for one side.
-
-    For each column inside the component’s x-span:
-      - build the vertical non-white run adjacent to that side,
-      - keep only the portion of that run where the row still has some white
-        in the ROI (so it's within the arch),
-      - if its height ≥ (1/3)*component_height, the column 'qualifies'.
-
-    Returns (qualifies_bool, qualified_columns_bool_array).
-    """
-    H, W = white_mask.shape
-    x0, x1 = int(comp.getminx()), int(comp.getmaxx())
-    x0 = max(0, min(x0, W-1)); x1 = max(0, min(x1, W-1))
-    if x1 <= x0:
-        return False, np.zeros(0, bool)
-
-    wm_roi = white_mask[:, x0:x1+1]            # H x Wc
-    row_has_white_in_roi = wm_roi.any(axis=1)  # H
-    if not row_has_white_in_roi.any():
-        return False, np.zeros(x1-x0+1, bool)
-
-    # rows that are still within the arch (have some white in ROI)
-    y_first = int(np.argmax(row_has_white_in_roi))
-    y_last  = int((H - 1) - np.argmax(row_has_white_in_roi[::-1]))
-
-    top_y, bot_y = _top_bottom_y_in_roi(wm_roi, H)
-    Hc = max(1, int(comp.yspan()))
-    thr_h = max(1, int(min_height_frac * Hc))
-
-    if side == 'bottom':
-        # vertical run from (bot_y[x]+1) down to y_last (inclusive), all rows have some white somewhere
-        gap_h = np.maximum(0, y_last - bot_y)
-    else:  # 'top'
-        # vertical run from y_first up to (top_y[x]-1), inclusive
-        gap_h = np.maximum(0, top_y - y_first)
-
-    qualified_cols = (gap_h >= thr_h)
-    qualifies = (_max_contiguous_true(qualified_cols) >= min_run_cols)
-    return qualifies, qualified_cols
-
-def _max_contiguous_true(run_bool: np.ndarray) -> int:
-    best = cur = 0
-    for v in run_bool:
-        if v: cur += 1; best = max(best, cur)
-        else: cur = 0
-    return best
-
-def _top_bottom_y_in_roi(wm_roi: np.ndarray):
-    H, Wc = wm_roi.shape
-    has = wm_roi.any(axis=0)
-    top = np.full(Wc, np.nan, float)
-    bot = np.full(Wc, np.nan, float)
-    first = np.argmax(wm_roi, axis=0)
-    top[has] = first[has]
-    rev_first = np.argmax(wm_roi[::-1, :], axis=0)
-    bot[has] = (H - 1) - rev_first[has]
-    top = _fill_nan_nearest(top, H/2).astype(int)
-    bot = _fill_nan_nearest(bot, H/2).astype(int)
-    return top, bot
 
 def hull_concavity_scores(white_mask, comp, band_frac=0.35, min_gap_h_frac=0.10):
     """
@@ -777,8 +474,6 @@ def cut_to_the_chase_efficient(image_path, mask_path):
             if picked is None:
                 picked = 'both'
     
-                picked = decision  # 'top' | 'bottom' | 'both' | 'none'
-
 # 3) build the mask to keep
             if picked == 'both' or picked == 'none':          # keep both when tie/none
                 chosen_bg = near_bg
