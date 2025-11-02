@@ -25,8 +25,8 @@ def make_all_nonblack_crops(
     imgpath,
     maskpath,
     dest_root,
-    xsize=512,
-    ysize=512,
+    xsize=256,
+    ysize=256,
     stride_x=None,           # default: half overlap
     stride_y=None,
     min_nonblack_frac=0.5,  # keep iff ≥75% non-black
@@ -113,8 +113,8 @@ def main():
         try:
             total += make_all_nonblack_crops(
                 img_path, mask_path, dest_root=dest_dir,
-                xsize=512, ysize=512,
-                stride_x=256, stride_y=256,       # 50% overlap; set to 1 for literal “all” positions
+                xsize=256, ysize=256,
+                stride_x=128, stride_y=128,       # 50% overlap; set to 1 for literal “all” positions
                 min_nonblack_frac=0.75,
                 black_thr=3,
                 include_edges=True
