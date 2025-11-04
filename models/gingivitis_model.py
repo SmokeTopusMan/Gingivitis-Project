@@ -3,6 +3,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+
 from torch.utils.data import Dataset, DataLoader, random_split
 from PIL import Image
 import torchvision.transforms as T
@@ -13,6 +14,32 @@ from albumentations.pytorch import ToTensorV2
 import segmentation_models_pytorch as smp
 from scipy.ndimage import gaussian_filter
 import matplotlib.pyplot as plt
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+def setup_dist():
+    """
+    Initialize DDP if launched with torchrun/SLURM; returns (is_dist, rank, local_rank, world_size, device).
+    Uses env:// init so it works with torchrun or SLURM-exported MASTER_*.
+    """
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    is_dist = world_size > 1
+
+    if not is_dist:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        return False, 0, 0, 1, device
+
+    rank = int(os.environ["RANK"])
+    local_rank = int(os.environ["LOCAL_RANK"])
+
+    torch.cuda.set_device(local_rank)
+
+    dist.init_process_group(backend="nccl", init_method="env://")
+
+    device = torch.device(f"cuda:{local_rank}")
+    return True, rank, local_rank, world_size, device
+
+IS_DIST, RANK, LOCAL_RANK, WORLD_SIZE, DEVICE = setup_dist()
+IS_MAIN = (RANK == 0)
 def is_pure_black_rgb(crop_rgb, thr=3, min_fraction=0.999):
     """
     Return True if at least `min_fraction` of pixels have all channels <= thr.
@@ -21,7 +48,6 @@ def is_pure_black_rgb(crop_rgb, thr=3, min_fraction=0.999):
     """
     if crop_rgb.ndim != 3 or crop_rgb.shape[2] != 3:
         return False
-    # pixel is "black" if all channels <= thr
     black_pixels = np.all(crop_rgb <= thr, axis=2)
     frac_black = black_pixels.mean()
     return frac_black >= min_fraction
@@ -53,26 +79,22 @@ class SegmentationDataset(Dataset):
 def create_gaussian_weight_map(crop_size, sigma=None):
     """Create a 2D Gaussian weight map that gives higher weights to center pixels"""
     if sigma is None:
-        sigma = crop_size / 6  # Adjust this for more/less aggressive weighting
-
-    # Create coordinate grids
+        sigma = crop_size / 6  
     x = np.arange(crop_size)
     y = np.arange(crop_size)
     x, y = np.meshgrid(x, y)
 
-    # Center coordinates
     cx, cy = crop_size // 2, crop_size // 2
 
-    # Gaussian weight map
     weight_map = np.exp(-((x - cx)**2 + (y - cy)**2) / (2 * sigma**2))
     return weight_map.astype(np.float32)
 
 def reverse_tta_predictions(predictions, transform_name):
     """Reverse TTA transformations on predictions"""
     if 'hflip' in transform_name:
-        predictions = torch.flip(predictions, dims=[3])  # Flip width
+        predictions = torch.flip(predictions, dims=[3])  
     if 'vflip' in transform_name:
-        predictions = torch.flip(predictions, dims=[2])  # Flip height
+        predictions = torch.flip(predictions, dims=[2])  
     return predictions
 
 def process_crop_batch(crops, model, device, transform, transform_name='base'):
@@ -83,24 +105,20 @@ def process_crop_batch(crops, model, device, transform, transform_name='base'):
         augmented = transform(image=crop, mask=np.zeros((crop.shape[0], crop.shape[1])))
         batch_tensors.append(augmented["image"])
 
-    # Stack into batch tensor
     batch_tensor = torch.stack(batch_tensors).to(device)
 
-    # Forward pass
     with torch.no_grad():
         predictions = model(batch_tensor)
         predictions = torch.sigmoid(predictions)
 
-        # Handle TTA reverse transforms
         if transform_name != 'base':
             predictions = reverse_tta_predictions(predictions, transform_name)
 
-        # Move to CPU and convert to numpy
         predictions = predictions.squeeze(1).cpu().numpy()
 
     return predictions
 
-def predict_large_image(image, model, device, crop_size=512, stride=128,
+def predict_large_image(image, model, device, crop_size=256, stride=128,
                        batch_size=4, threshold=0.5, use_tta=False,
                        use_gaussian_weights=True, compute_crop_dice=False,
                        ground_truth_mask=None,
@@ -119,38 +137,31 @@ def predict_large_image(image, model, device, crop_size=512, stride=128,
     image_np = np.array(image)
     original_h, original_w = image_np.shape[:2]
 
-    # Calculate padding
     pad_h = (stride - (original_h - crop_size) % stride) % stride if original_h > crop_size else max(0, crop_size - original_h)
     pad_w = (stride - (original_w - crop_size) % stride) % stride if original_w > crop_size else max(0, crop_size - original_w)
 
-    # Pad image with reflection for more natural boundaries
     padded_img = np.pad(image_np, ((0, pad_h), (0, pad_w), (0, 0)), mode='reflect')
     padded_h, padded_w = padded_img.shape[:2]
 
-    # Pad ground truth mask if provided for crop Dice computation
     padded_gt_mask = None
     if compute_crop_dice and ground_truth_mask is not None:
         gt_mask_np = np.array(ground_truth_mask)
         padded_gt_mask = np.pad(gt_mask_np, ((0, pad_h), (0, pad_w)), mode='reflect')
 
-    # Initialize output arrays
     pred_sum = np.zeros((padded_h, padded_w), dtype=np.float32)
     weight_sum = np.zeros((padded_h, padded_w), dtype=np.float32)
 
-    # Create weight map for blending
     if use_gaussian_weights:
         weight_map = create_gaussian_weight_map(crop_size)
     else:
         weight_map = np.ones((crop_size, crop_size), dtype=np.float32)
 
-    # Create transforms
     base_transform = A.Compose([
         A.Resize(crop_size, crop_size),
         A.Normalize(),
         ToTensorV2(),
     ])
 
-    # TTA transforms if enabled
     tta_transforms = {}
     if use_tta:
         tta_transforms = {
@@ -159,7 +170,6 @@ def predict_large_image(image, model, device, crop_size=512, stride=128,
             'hvflip': A.Compose([A.HorizontalFlip(p=1.0), A.VerticalFlip(p=1.0), A.Resize(crop_size, crop_size), A.Normalize(), ToTensorV2()]),
         }
 
-    # Generate crop coordinates
     crop_coords = []
     for i in range(0, padded_h - crop_size + 1, stride):
         for j in range(0, padded_w - crop_size + 1, stride):
@@ -167,7 +177,6 @@ def predict_large_image(image, model, device, crop_size=512, stride=128,
 
     print(f"Processing {len(crop_coords)} crops in batches of {batch_size}")
 
-    # For crop-level Dice tracking
     crop_dice_scores = []
 
     model.eval()
@@ -189,10 +198,8 @@ def predict_large_image(image, model, device, crop_size=512, stride=128,
                     gt_crop = padded_gt_mask[i:i+crop_size, j:j+crop_size]
                     batch_gt_crops.append(gt_crop)
 
-            # Base predictions
             batch_predictions = process_crop_batch(batch_crops, model, device, base_transform, 'base')
 
-            # TTA
             if use_tta:
                 tta_predictions = []
                 for tta_name, tta_transform in tta_transforms.items():
@@ -201,13 +208,11 @@ def predict_large_image(image, model, device, crop_size=512, stride=128,
                 all_predictions = [batch_predictions] + tta_predictions
                 batch_predictions = np.mean(all_predictions, axis=0)
 
-            # OPTIONAL: force predictions to negative on black crops
             if force_black_pred:
                 for k, is_blk in enumerate(batch_is_black):
                     if is_blk:
                         batch_predictions[k].fill(0.0)
 
-            # Crop-level Dice (override GT to negative on black crops)
             if compute_crop_dice and batch_gt_crops:
                 for idx, (i, j) in enumerate(batch_coords):
                     pred_crop = batch_predictions[idx]
@@ -234,13 +239,11 @@ def predict_large_image(image, model, device, crop_size=512, stride=128,
                         'is_black_image_crop': bool(batch_is_black[idx]),
                     })
 
-            # Accumulate predictions with weighting
             for idx, (i, j) in enumerate(batch_coords):
                 pred = batch_predictions[idx]
                 pred_sum[i:i+crop_size, j:j+crop_size] += pred * weight_map
                 weight_sum[i:i+crop_size, j:j+crop_size] += weight_map
 
-            # Progress printing
             if (batch_start // batch_size + 1) % 10 == 0:
                 progress = (batch_end / len(crop_coords)) * 100
                 if compute_crop_dice and crop_dice_scores:
@@ -250,7 +253,6 @@ def predict_large_image(image, model, device, crop_size=512, stride=128,
                 else:
                     print(f"  Progress: {progress:.1f}%")
 
-    # Crop Dice stats
     if compute_crop_dice and crop_dice_scores:
         dice_values = [c['dice'] for c in crop_dice_scores]
         print(f"\n  Crop-level statistics:")
@@ -274,10 +276,8 @@ def predict_large_image(image, model, device, crop_size=512, stride=128,
             low_mask_dice = np.mean([c['dice'] for c in low_mask])
             print(f"    Low mask crops (≤1% mask): {len(low_mask)} crops, avg Dice: {low_mask_dice:.3f}")
 
-    # Normalize by weights
     final_pred = np.divide(pred_sum, weight_sum, out=np.zeros_like(pred_sum), where=weight_sum!=0)
 
-    # Apply threshold and crop to original size
     final_mask = (final_pred > threshold).astype(np.uint8) * 255
     final_mask = final_mask[:original_h, :original_w]
 
@@ -295,7 +295,6 @@ def predict_large_image_memory_efficient(image, model, device, crop_size=512, st
     image_np = np.array(image)
     h, w = image_np.shape[:2]
 
-    # Estimate memory usage and determine chunk size
     bytes_per_pixel = 4  # float32
     estimated_memory = (h * w * bytes_per_pixel) / (1024**3)  # GB
 
@@ -303,9 +302,8 @@ def predict_large_image_memory_efficient(image, model, device, crop_size=512, st
 
     if estimated_memory > max_memory_gb:
         print(f"Using memory-efficient processing (chunks)")
-        # Process in chunks
         chunk_height = int((max_memory_gb * 1024**3) / (w * bytes_per_pixel))
-        chunk_height = max(chunk_height, crop_size * 2)  # Ensure minimum chunk size
+        chunk_height = max(chunk_height, crop_size * 2)  
 
         final_mask = np.zeros((h, w), dtype=np.uint8)
 
@@ -315,15 +313,12 @@ def predict_large_image_memory_efficient(image, model, device, crop_size=512, st
 
             chunk = image_np[start_h:end_h, :, :]
 
-            # Convert chunk back to PIL Image
             chunk_pil = Image.fromarray(chunk)
             chunk_mask = predict_large_image(
                 chunk_pil, model, device, crop_size, stride, threshold=threshold
             )
 
-            # Handle overlapping regions
             if start_h > 0:
-                # Blend overlapping region
                 overlap_size = crop_size
                 blend_start = max(0, crop_size // 2)
 
@@ -341,70 +336,69 @@ def predict_large_image_memory_efficient(image, model, device, crop_size=512, st
         return final_mask
     else:
         print("Using standard processing")
-        # Use regular method
         return predict_large_image(image, model, device, crop_size, stride, threshold=threshold)
 
-def validate_model(model, val_loader, loss_fn, device):
-    """Validation function"""
+def validate_model(model, val_loader, loss_fn, device, thr=0.5):
+    """Validation with all-images Dice and positive-only Dice."""
     model.eval()
-    val_loss = 0.0
-    dice_scores = []
+    val_loss_sum = 0.0
+    n_batches = 0
+
+    dice_all_sum = 0.0
+    dice_pos_sum = 0.0
+    pos_img_count = 0
 
     with torch.no_grad():
         for images, masks in val_loader:
             images = images.to(device, non_blocking=True)
-            masks = masks.to(device, non_blocking=True).unsqueeze(1).float()
+            masks  = masks.to(device, non_blocking=True).unsqueeze(1).float()
 
-            # Forward pass
-            preds = model(images)
-            loss = loss_fn(preds, masks)
-            val_loss += loss.item()
+            logits = model(images)
+            loss_weighted = weighted_dice_loss_from_logits(logits, masks,weight_pos=3.0,weight_neg=1.0)
+            val_loss_sum += float(loss_weighted.item())
+            n_batches += 1
 
-            # Calculate Dice score
-            preds_sigmoid = torch.sigmoid(preds)
-            preds_binary = (preds_sigmoid > 0.5).float()
+            dice_all_b, dice_pos_b, num_pos_b = dice_coeff_from_logits(logits, masks, thr=thr)
+            dice_all_sum += float(dice_all_b.item())
+            dice_pos_sum += float(dice_pos_b.item()) if num_pos_b > 0 else 0.0
+            pos_img_count += int(num_pos_b)
 
-            intersection = (preds_binary * masks).sum()
-            union = preds_binary.sum() + masks.sum()
-            dice = (2. * intersection) / (union + 1e-7)
-            dice_scores.append(dice.item())
+    n_batches    = ddp_all_reduce_int(n_batches, device)
+    dice_all_sum = ddp_all_reduce_scalar(dice_all_sum, device)
+    dice_pos_sum = ddp_all_reduce_scalar(dice_pos_sum, device)
+    pos_img_count = ddp_all_reduce_int(pos_img_count, device)
+    avg_val_loss_weighted=ddp_all_reduce_scalar(val_loss_sum,device) / max(1, n_batches)
+    
+    avg_dice_all = dice_all_sum / max(1, n_batches)
+    avg_dice_pos = (dice_pos_sum / max(1, pos_img_count)) if pos_img_count > 0 else 0.0
 
-    avg_val_loss = val_loss / len(val_loader)
-    avg_dice = np.mean(dice_scores)
+    return avg_val_loss_weighted, avg_dice_all, avg_dice_pos, pos_img_count
 
-    return avg_val_loss, avg_dice
+def plot_training_history(train_losses, val_losses,
+                          train_dice_all, val_dice_all,
+                          train_dice_pos, val_dice_pos):
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4))
 
-def plot_training_history(train_losses, val_losses, train_dice_scores, val_dice_scores):
-    """Plot training history"""
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+    ax = axes[0]
+    ax.plot(train_losses, label='Train Loss')
+    ax.plot(val_losses, label='Val Loss')
+    ax.set_title('Loss'); ax.set_xlabel('Epoch'); ax.grid(True); ax.legend()
 
-    # Plot losses
-    ax1.plot(train_losses, label='Train Loss', color='blue')
-    ax1.plot(val_losses, label='Val Loss', color='red')
-    ax1.set_xlabel('Epoch')
-    ax1.set_ylabel('Loss')
-    ax1.set_title('Training and Validation Loss')
-    ax1.legend()
-    ax1.grid(True)
+    ax = axes[1]
+    ax.plot(train_dice_all, label='Train Dice (all)')
+    ax.plot(val_dice_all, label='Val Dice (all)')
+    ax.set_title('Dice (all images)'); ax.set_xlabel('Epoch'); ax.grid(True); ax.legend()
 
-    # Plot Dice scores
-    ax2.plot(train_dice_scores, label='Train Dice', color='blue')
-    ax2.plot(val_dice_scores, label='Val Dice', color='red')
-    ax2.set_xlabel('Epoch')
-    ax2.set_ylabel('Dice Score')
-    ax2.set_title('Training and Validation Dice Score')
-    ax2.legend()
-    ax2.grid(True)
+    ax = axes[2]
+    ax.plot(train_dice_pos, label='Train Dice (pos)')
+    ax.plot(val_dice_pos, label='Val Dice (pos)')
+    ax.set_title('Dice (positive-only)'); ax.set_xlabel('Epoch'); ax.grid(True); ax.legend()
 
     plt.tight_layout()
     plt.savefig('training_history.png', dpi=300, bbox_inches='tight')
     plt.show()
 
-# Check GPU availability and set device
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-
-# Test GPU functionality
 if torch.cuda.is_available():
     print(f"GPU: {torch.cuda.get_device_name(0)}")
     print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
@@ -413,144 +407,215 @@ if torch.cuda.is_available():
     print("✓ GPU computation test passed")
     del test_tensor, result
 else:
-    print("my life is shit")
-# Model setup
+    print("it didn't, cpu suffering it is")
 model = smp.UnetPlusPlus(
-    encoder_name="resnet34",        # can be 'efficientnet-b0', etc.
-    encoder_weights="imagenet",     # use "None" if training from scratch
+    encoder_name="resnet34",       
+    encoder_weights="imagenet",     
     in_channels=3,
-    classes=1,                      # binary segmentation
+    classes=1,                      
 )
-model = model.to(device)
+model = model.to(DEVICE)
+if IS_DIST:
+    model = DDP(model,device_ids=[LOCAL_RANK],output_device=LOCAL_RANK)
 
-
-# Simple transform for training (since data is already augmented through cropping)
 train_transform = A.Compose([
-    A.Resize(512, 512),
+    A.Resize(256, 256),
     A.Normalize(),
     ToTensorV2(),
 ], additional_targets={"mask": "mask"})
 
-# Validation transform (no augmentation)
 val_transform = A.Compose([
-    A.Resize(512, 512),
+    A.Resize(256, 256),
     A.Normalize(),
     ToTensorV2(),
 ], additional_targets={"mask": "mask"})
 
-# Create full dataset
-full_dataset = SegmentationDataset("newstage/train/crops_images", "newstage/train/mask_crops_images", train_transform)
+full_dataset = SegmentationDataset("downloads/train/crops_images", "downloads/train/mask_crops_images", train_transform)
 
-# Split dataset into train and validation (80/20 split)
 train_size = int(0.8 * len(full_dataset))
 val_size = len(full_dataset) - train_size
 print(f"Dataset split: {train_size} training, {val_size} validation")
 
-# Create train and validation datasets
 train_dataset, val_indices = random_split(full_dataset, [train_size, val_size])
 
-# Create validation dataset with different transform
-val_dataset = SegmentationDataset("newstage/train/crops_images", "newstage/train/mask_crops_images", val_transform)
+val_dataset = SegmentationDataset("downloads/train/crops_images", "downloads/train/mask_crops_images", val_transform)
 val_dataset.images = [full_dataset.images[i] for i in val_indices.indices]
+from torch.utils.data.distributed import DistributedSampler
 
-# Data loaders
-train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True,
-                          num_workers=2, pin_memory=True,
-                          persistent_workers=True, prefetch_factor=2)
+if IS_DIST:
+    train_sampler = DistributedSampler(train_dataset, shuffle=True, drop_last=False)
+    train_loader = DataLoader(train_dataset, batch_size=4, sampler=train_sampler,
+                              num_workers=2, pin_memory=True, persistent_workers=True)
+else:
+    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True,
+                              num_workers=2, pin_memory=True,
+                              persistent_workers=True, prefetch_factor=2)
+
 val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False,
                         num_workers=2, pin_memory=True,
                         persistent_workers=True, prefetch_factor=2)
-# Move model to GPU
-model = model.to(device)
+
 loss_fn = smp.losses.DiceLoss("binary")
 optimizer = optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-5)  # Added weight decay
 scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, factor=0.5, verbose=True)
 
-# Training setup
 num_epochs = 25
 best_val_dice = 0.0
 patience = 25
 patience_counter = 0
 early_stop = False
+# ===== Metrics helpers =====
+def weighted_dice_loss_from_logits(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    weight_pos: float = 3.0,
+    weight_neg: float = 1.0,
+    eps: float = 1e-7,
+):
 
-# For plotting
+    probs = torch.sigmoid(logits)
+    N = targets.size(0)
+
+    p_flat = probs.view(N, -1)
+    t_flat = targets.view(N, -1)
+
+    intersection = (p_flat * t_flat).sum(dim=1)
+    union = p_flat.sum(dim=1) + t_flat.sum(dim=1)
+
+    dice = (2.0 * intersection + eps) / (union + eps)      
+    per_img_loss = 1.0 - dice                              
+
+    # image is "positive" if GT has any positive pixel
+    has_pos = (t_flat.sum(dim=1) > 0)
+
+    w_pos = torch.full_like(per_img_loss, weight_pos)
+    w_neg = torch.full_like(per_img_loss, weight_neg)
+    weights = torch.where(has_pos, w_pos, w_neg)          
+
+    loss = (per_img_loss * weights).sum() / (weights.sum() + eps)
+    return loss
+def dice_coeff_from_logits(logits: torch.Tensor, targets: torch.Tensor, thr: float = 0.5):
+    """
+    logits: [N,1,H,W] raw logits or probabilities (0..1). If raw logits, pass through sigmoid before calling.
+    targets: [N,1,H,W] float {0,1}
+    Returns: (dice_all_batch_mean, dice_pos_batch_mean, num_pos_images_in_batch)
+    """
+    probs = torch.sigmoid(logits)
+    preds = (probs > thr).float()
+
+    # per-image dice
+    intersection = (preds * targets).flatten(1).sum(dim=1)
+    union = preds.flatten(1).sum(dim=1) + targets.flatten(1).sum(dim=1)
+    dice_per_img = torch.where(union == 0, torch.ones_like(union), (2.0 * intersection) / (union + 1e-7))
+
+    # positive-only mask (GT has any positives)
+    pos_mask = (targets.flatten(1).sum(dim=1) > 0)
+    if pos_mask.any():
+        dice_pos = dice_per_img[pos_mask].mean()
+        num_pos = int(pos_mask.sum().item())
+    else:
+        dice_pos = torch.tensor(0.0, device=logits.device)
+        num_pos = 0
+
+    dice_all = dice_per_img.mean()
+    return dice_all, dice_pos, num_pos
+
+
+def ddp_all_reduce_scalar(value: float, device: torch.device):
+    """Sum-reduce a scalar across ranks (no-op if WORLD_SIZE==1). Returns the summed value (float)."""
+    if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
+        t = torch.tensor([value], dtype=torch.float32, device=device)
+        torch.distributed.all_reduce(t, op=torch.distributed.ReduceOp.SUM)
+        return float(t.item())
+    return float(value)
+
+
+def ddp_all_reduce_int(value: int, device: torch.device):
+    if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
+        t = torch.tensor([value], dtype=torch.int64, device=device)
+        torch.distributed.all_reduce(t, op=torch.distributed.ReduceOp.SUM)
+        return int(t.item())
+    return int(value)
 train_losses = []
 val_losses = []
 train_dice_scores = []
 val_dice_scores = []
-
+train_pos_dice_scores = []
+val_pos_dice_scores = []
+val_pos_counts = []
 print("Starting training with validation...")
 import os, torch, torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-def setup_dist():
-    # SLURM or torchrun exports these:
-    rank = int(os.environ.get("RANK", 0))
-    world_size = int(os.environ.get("WORLD_SIZE", 1))
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend="nccl", init_method="env://",
-                            world_size=world_size, rank=rank)
-    return rank, local_rank, world_size
 
-rank, local_rank, world_size = setup_dist()
-torch.cuda.set_device(local_rank)
 
-device = torch.device(f"cuda:{local_rank}")
+torch.cuda.set_device(LOCAL_RANK)
+
+device = torch.device(f"cuda:{LOCAL_RANK}")
 model = model.to(device)
-model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+model = DDP(model, device_ids=[LOCAL_RANK], output_device=LOCAL_RANK)
 per_gpu_batch = 4
-# Use a DistributedSampler for the training set:
 from torch.utils.data.distributed import DistributedSampler
 train_sampler = DistributedSampler(train_dataset, shuffle=True, drop_last=False)
 train_loader = DataLoader(train_dataset, batch_size=4, sampler=train_sampler,
                           num_workers=2, pin_memory=True, persistent_workers=True)
 
-# For validation you can keep a regular DataLoader, or use another DistributedSampler and
-# compute metrics on rank 0 only. Example: only save/print on rank 0:
-is_main = (rank == 0)
-if is_main:
-    torch.save(model.module.state_dict(), "best_model.pth")  # note model.module under DDP
 
-# Use a DistributedSampler for training
+is_main = (RANK == 0)
+if is_main:
+    torch.save(model.module.state_dict(), "best_model.pth")  
+train_loss_sum = 0.0
+train_batches = 0
+train_dice_all_sum = 0.0
+train_dice_pos_sum = 0.0
+train_pos_img_count = 0
 train_sampler = DistributedSampler(train_dataset, shuffle=True, drop_last=False)
 train_loader = DataLoader(train_dataset, batch_size=4,
                           sampler=train_sampler, num_workers=2, pin_memory=True,
                           persistent_workers=True)
-# remember each epoch:
+def get_state_dict(m):
+    return m.module.state_dict() if isinstance(m, DDP) else m.state_dict()
+
 for epoch in range(num_epochs):
-    train_sampler.set_epoch(epoch)
+    if IS_DIST:
+        train_sampler.set_epoch(epoch)
     if early_stop:
         print("Early stopping triggered!")
         break
 
     print(f"\nEpoch {epoch + 1}/{num_epochs}")
 
-    # Training phase
     model.train()
     train_loss = 0.0
     train_dice_sum = 0.0
     batch_count = 0
-
+    train_loss_sum = 0.0
+    train_batches = 0
+    train_dice_all_sum = 0.0
+    train_dice_pos_sum = 0.0
+    train_pos_img_count = 0
     for images, masks in train_loader:
-        # Move data to GPU
         images = images.to(device, non_blocking=True)
         masks = masks.to(device, non_blocking=True).unsqueeze(1).float()
 
-        # Forward pass
         preds = model(images)
-        loss = loss_fn(preds, masks)
+        loss = weighted_dice_loss_from_logits(preds, masks,weight_pos=3.0,weight_neg=1.0)
 
-        # Backward pass
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+        with torch.no_grad():
+            dice_all_b, dice_pos_b, num_pos_b = dice_coeff_from_logits(preds, masks, thr=0.5)
+            train_dice_all_sum += float(dice_all_b.item())
+            if num_pos_b > 0:
+                train_dice_pos_sum += float(dice_pos_b.item())
+            train_pos_img_count += int(num_pos_b)
 
-        # Statistics
+        train_loss_sum += float(loss.item())
+        train_batches += 1
         train_loss += loss.item()
         batch_count += 1
 
-        # Calculate training Dice score
         with torch.no_grad():
             preds_sigmoid = torch.sigmoid(preds)
             preds_binary = (preds_sigmoid > 0.5).float()
@@ -562,40 +627,56 @@ for epoch in range(num_epochs):
         if batch_count % 10 == 0:
             print(f"  Batch {batch_count}, Loss: {loss.item():.4f}, Dice: {dice.item():.4f}")
 
-    # Calculate average training metrics
     avg_train_loss = train_loss / len(train_loader)
     avg_train_dice = train_dice_sum / len(train_loader)
 
-    # Validation phase
-    avg_val_loss, avg_val_dice = validate_model(model, val_loader, loss_fn, device)
+    avg_val_loss_weighted, avg_val_dice_all, avg_val_dice_pos, val_pos_count = validate_model(model, val_loader, loss_fn, device, thr=0.5)
 
-    # Learning rate scheduling
-    scheduler.step(avg_val_loss)
+    scheduler.step(avg_val_loss_weighted)
 
-    # Store metrics for plotting
-    train_losses.append(avg_train_loss)
-    val_losses.append(avg_val_loss)
-    train_dice_scores.append(avg_train_dice)
-    val_dice_scores.append(avg_val_dice)
+    train_loss_sum = ddp_all_reduce_scalar(train_loss_sum, device)
+    train_batches  = ddp_all_reduce_int(train_batches, device)
+    train_dice_all_sum = ddp_all_reduce_scalar(train_dice_all_sum, device)
+    train_dice_pos_sum = ddp_all_reduce_scalar(train_dice_pos_sum, device)
+    train_pos_img_count = ddp_all_reduce_int(train_pos_img_count, device)
 
-    # Print epoch summary
+    avg_train_loss = train_loss_sum / max(1, train_batches)
+    avg_train_dice_all = train_dice_all_sum / max(1, train_batches)
+    avg_train_dice_pos = (train_dice_pos_sum / max(1, train_pos_img_count)) if train_pos_img_count > 0 else 0.0
     print(f"  Train Loss: {avg_train_loss:.4f}, Train Dice: {avg_train_dice:.4f}")
-    print(f"  Val Loss:   {avg_val_loss:.4f}, Val Dice:   {avg_val_dice:.4f}")
-    print(f"  Loss Gap:   {avg_val_loss - avg_train_loss:.4f}")
+    print(f"  Val weighted Loss:   {avg_val_loss_weighted:.4f}, Val Dice:   {avg_val_dice_all:.4f}")
+    print(f"  Loss Gap:   {avg_val_loss_weighted - avg_train_loss:.4f}")
+    if (RANK == 0):
+        print(f"  Train Loss: {avg_train_loss:.4f}, Train Dice(all): {avg_train_dice_all:.4f}, Train Dice(pos): {avg_train_dice_pos:.4f} ({train_pos_img_count} pos imgs)")
+        print(f"  Val   Loss: {avg_val_loss_weighted:.4f},   Val Dice(all): {avg_val_dice_all:.4f},   Val Dice(pos): {avg_val_dice_pos:.4f} ({val_pos_count} pos imgs)")
 
-    # Check for overfitting
-    loss_gap = avg_val_loss - avg_train_loss
+    train_losses.append(avg_train_loss)
+    val_losses.append(avg_val_loss_weighted)
+    train_dice_scores.append(avg_train_dice_all)   
+    val_dice_scores.append(avg_val_dice_all)
+    train_pos_dice_scores.append(avg_train_dice_pos)  
+    val_pos_dice_scores.append(avg_val_dice_pos)
+    val_pos_counts.append(val_pos_count)
+    loss_gap = avg_val_loss_weighted - avg_train_loss
     if loss_gap > 0.3:
         print("  ⚠️  OVERFITTING DETECTED! (Loss gap > 0.3)")
     elif loss_gap > 0.15:
         print("  ⚠️  Possible overfitting (Loss gap > 0.15)")
-
-    # Early stopping and model saving
-    if avg_val_dice > best_val_dice:
-        best_val_dice = avg_val_dice
+    key_metric = avg_val_dice_pos  
+    if key_metric > best_val_dice:
+        best_val_dice = key_metric
         patience_counter = 0
         torch.save(model.state_dict(), "best_model_ging.pth")
-        print(f"  ✓ New best validation Dice: {best_val_dice:.4f} - Model saved!")
+        if RANK == 0:
+            print(f"  ✓ New best Val Dice(pos): {best_val_dice:.4f} - Model saved!")
+    else:
+        patience_counter += 1
+    key_metric = avg_val_dice_pos  
+    if key_metric > best_val_dice and IS_MAIN:
+        best_val_dice = key_metric
+        patience_counter = 0
+        torch.save(get_state_dict(model), "best_model_ging.pth")
+        print(f"  ✓ New best Val Dice(pos): {best_val_dice:.4f} - Model saved!")
     else:
         patience_counter += 1
         print(f"  No improvement for {patience_counter} epochs")
@@ -606,17 +687,14 @@ for epoch in range(num_epochs):
 print("\nTraining completed!")
 print(f"Best validation Dice score: {best_val_dice:.4f}")
 
-# Plot training history
-plot_training_history(train_losses, val_losses, train_dice_scores, val_dice_scores)
-
-# Load best model for testing
+plot_training_history(train_losses, val_losses,
+                          train_dice_scores, val_dice_scores,
+                          train_pos_dice_scores, val_pos_dice_scores)
 print("\nLoading best model for testing...")
 model.load_state_dict(torch.load("best_model_ging.pth"))
 
-# Testing/Evaluation - LOAD TEST IMAGES AT ORIGINAL SIZE
 print("Starting evaluation on test set...")
 
-# Create test dataset class that preserves original dimensions
 class TestDatasetOriginalSize(Dataset):
     def __init__(self, images_dir, masks_dir):
         self.images_dir = images_dir
@@ -628,45 +706,37 @@ class TestDatasetOriginalSize(Dataset):
 
     def __getitem__(self, idx):
         img_name = self.images[idx]
-        # Load images at their ORIGINAL size - no resizing!
         image = Image.open(os.path.join(self.images_dir, img_name)).convert("RGB")
         mask = Image.open(os.path.join(self.masks_dir, img_name)).convert("L")
         return image, mask, img_name
 
-# Create dataset but iterate directly (no DataLoader to avoid PIL Image batching issues)
-test_dataset = TestDatasetOriginalSize("newstage/test/relevant_images", "newstage/test/masks")
+test_dataset = TestDatasetOriginalSize("downloads/test/relevant_images", "downloads/test/masks")
 
 print(f"Test dataset created with {len(test_dataset)} images (original sizes preserved)")
 
-# Set model to eval mode
 model.eval()
 
-# Optional: make a folder to save predicted masks
 os.makedirs("predictions", exist_ok=True)
 
-# For evaluation
 dice_scores = []
 
 with torch.no_grad():
-    # Iterate directly through dataset indices instead of using DataLoader
     for i in range(len(test_dataset)):
         pil_image, pil_mask, img_name = test_dataset[i]
 
         print(f"\nProcessing test image {i+1}/{len(test_dataset)}: {img_name}")
         print(f"ORIGINAL image size: {pil_image.size}")  # This should show the real size now!
 
-        # Choose prediction method based on image size
         image_area = pil_image.size[0] * pil_image.size[1]
 
         print("Using standard prediction with TTA and crop-level Dice tracking")
         result = predict_large_image(
                 pil_image, model, device,
-                crop_size=512, stride=256, batch_size=4, threshold=0.5,
+                crop_size=256, stride=128, batch_size=4, threshold=0.5,
                 use_tta=True, use_gaussian_weights=True,
                 compute_crop_dice=True, ground_truth_mask=pil_mask
             )
 
-            # Handle return value (either just pred or (pred, crop_dice_scores))
         if isinstance(result, tuple):
                 pred, crop_dice_scores = result
         else:
@@ -675,18 +745,30 @@ with torch.no_grad():
 
         print(f"Final prediction size: {pred.shape[1]}×{pred.shape[0]}")
 
-        # Convert prediction to tensor
-        pred_tensor = torch.from_numpy(pred / 255.0).unsqueeze(0).float()  # [1, H, W]
+        pred_tensor = torch.from_numpy(pred / 255.0).unsqueeze(0).float()  
 
-        # Save prediction
         save_image(pred_tensor, f"predictions/pred_{i}_{img_name}")
 
-        # Convert ground truth mask to tensor at original size
         mask_np = np.array(pil_mask)
         mask_tensor = torch.from_numpy((mask_np > 127).astype('float32')).unsqueeze(0).float()
         mask_tensor = mask_tensor.to(device)
         pred_tensor = pred_tensor.to(device)
+        intersection = (pred_tensor * mask_tensor).sum()
+        union = pred_tensor.sum() + mask_tensor.sum()
+        dice_all_img = (2. * intersection) / (union + 1e-7)
 
+        gt_pos = (mask_tensor.sum() > 0)
+        if gt_pos:
+            dice_pos_img = dice_all_img
+        else:
+            dice_pos_img = None  
+
+        dice_scores.append(float(dice_all_img.item()))
+        if gt_pos:
+            try:
+                dice_scores_pos.append(float(dice_pos_img.item()))
+            except NameError:
+                dice_scores_pos = [float(dice_pos_img.item())]
         # Verify sizes match (they should now!)
         if mask_tensor.shape[-2:] != pred_tensor.shape[-2:]:
             print(f"⚠️  WARNING: Size mismatch! Mask: {mask_tensor.shape[-2:]}, Pred: {pred_tensor.shape[-2:]}")
@@ -705,11 +787,13 @@ with torch.no_grad():
         print(f"Test image {i}: Dice score = {dice.item():.4f}")
 
 # Summary
-mean_dice = np.mean(dice_scores)
+mean_dice_all = float(np.mean(dice_scores)) if len(dice_scores) else 0.0
+mean_dice_pos = float(np.mean(dice_scores_pos)) if 'dice_scores_pos' in locals() and len(dice_scores_pos) else 0.0
+
 print(f"\nFinal Results:")
-print(f"Best validation Dice score: {best_val_dice:.4f}")
-print(f"Average test Dice score: {mean_dice:.4f}")
-print(f"Model saved as 'best_model.pth'")
+print(f"Best validation key metric: {best_val_dice:.4f}")
+print(f"Average test Dice (all images): {mean_dice_all:.4f}")
+print(f"Average test Dice (positive-only): {mean_dice_pos:.4f}")
 
 # Clear GPU cache
 if torch.cuda.is_available():
@@ -743,4 +827,7 @@ print("\nFor best quality (slower):")
 print("pred = predict_large_image(image, model, device, use_tta=True, stride=96)")
 print("\nFor very large images:")
 print("pred = predict_large_image_memory_efficient(image, model, device, max_memory_gb=4)")
-dist.destroy_process_group()
+if IS_DIST:
+    dist.barrier()
+    dist.destroy_process_group()
+    
