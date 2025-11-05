@@ -149,7 +149,7 @@ class GingivitisApp:
 
     def _run_teeth_extraction(self, input_dir):
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        temp_dir = os.path.join(script_dir, "teeth_model_temp")
+        temp_dir = os.path.join(script_dir, "temp_teeth_model")
         os.makedirs(temp_dir, exist_ok=True)
 
         project_root = os.path.dirname(script_dir)
@@ -172,6 +172,45 @@ class GingivitisApp:
         except subprocess.CalledProcessError as e:
             print(f"Error running teeth extraction: {e.stderr}")
             messagebox.showerror("Extraction Error", f"Failed to run teeth extraction:\n{e.stderr}")
+            return False
+        except Exception as e:
+            print(f"Unexpected error: {str(e)}")
+            messagebox.showerror("Error", f"An unexpected error occurred:\n{str(e)}")
+            return False
+
+    def _run_get_relevant(self, original_input_dir):
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        temp_dir = os.path.join(script_dir, "temp_teeth_model")
+
+        project_root = os.path.dirname(script_dir)
+        get_relevant_script = os.path.join(project_root, "tools", "get_relevant.py")
+
+        cmd = [
+            sys.executable,
+            get_relevant_script,
+            original_input_dir,
+            temp_dir,
+            script_dir
+        ]
+
+        try:
+            print(f"Running get_relevant: {' '.join(cmd)}")
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            print(result.stdout)
+
+            old_dir = os.path.join(script_dir, "relevant_images")
+            new_dir = os.path.join(script_dir, "temp_relevant_images")
+
+            if os.path.exists(old_dir):
+                if os.path.exists(new_dir):
+                    shutil.rmtree(new_dir)
+                os.rename(old_dir, new_dir)
+                print(f"Renamed 'relevant_images' to 'temp_relevant_images'")
+
+            return True
+        except subprocess.CalledProcessError as e:
+            print(f"Error running get_relevant: {e.stderr}")
+            messagebox.showerror("Get Relevant Error", f"Failed to run get_relevant:\n{e.stderr}")
             return False
         except Exception as e:
             print(f"Unexpected error: {str(e)}")
@@ -201,7 +240,9 @@ class GingivitisApp:
                     print(f"Directory path submitted: {path}")
 
                     if self._run_teeth_extraction(path):
-                        messagebox.showinfo("Success", "Teeth extraction completed successfully!")
+                        print("Teeth extraction completed, now running get_relevant...")
+                        if self._run_get_relevant(path):
+                            messagebox.showinfo("Success", "Processing completed successfully!")
 
             except Exception as e:
                 messagebox.showerror("Error", f"An error occurred: {str(e)}")

@@ -122,6 +122,10 @@ def load_model(weights_path, device):
         classes=1,
     ).to(device)
     state = torch.load(weights_path, map_location=device)
+
+    if list(state.keys())[0].startswith('module.'):
+        state = {k.replace('module.', '', 1): v for k, v in state.items()}
+
     model.load_state_dict(state)
     return model
 

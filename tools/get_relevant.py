@@ -558,15 +558,15 @@ def main():
 
         print(f"[{i}/{len(image_files)}] {filename}")
         if not (os.path.isfile(img_path) and mask_path and os.path.isfile(mask_path)):
-            print(f"[!] Skipping {filename} - missing image or mask (tried: {mask_path})")
+            print(f"Skipping {filename} - missing image or mask (tried: {mask_path})")
             continue
 
         try:
             cut_to_the_chase_efficient(img_path, mask_path)
             # or cut_to_the_chase_chunked(img_path, mask_path)
-            print(f"[✓] Completed {filename}")
+            print(f"Completed {filename}")
         except Exception as e:
-            print(f"[✗] Error processing {filename}: {e}")
+            print(f"Error processing {filename}: {e}")
 
         gc.collect()
 
