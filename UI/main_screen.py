@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import sys
+import numpy as np
 
 
 class GingivitisApp:
@@ -158,18 +159,19 @@ class GingivitisApp:
             weights_path = os.path.join(project_root, "weights&results", "Gingivitis_model_weights.pth")
 
         os.makedirs(temp_dir, exist_ok=True)
-        teeth_extraction_script = os.path.join(project_root, "tools", "run_model.py")
+        model_script = os.path.join(project_root, "tools", "run_model.py")
 
         cmd = [
             sys.executable,
-            teeth_extraction_script,
+            model_script,
             "--weights", weights_path,
             "--input", input_dir,
             "--output", temp_dir
         ]
 
         try:
-            print(f"Running teeth extraction: {' '.join(cmd)}")
+            model_name = weights.replace("_weights.pth", "").replace("_model", "")
+            print(f"Running {model_name} model: {' '.join(cmd)}")
             result = subprocess.run(cmd, check=True, capture_output=True, text=True)
             print(result.stdout)
             return True
@@ -221,6 +223,83 @@ class GingivitisApp:
             messagebox.showerror("Error", f"An unexpected error occurred:\n{str(e)}")
             return False
 
+    def _create_final_results(self, original_input_dir):
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        gingivitis_masks_dir = os.path.join(script_dir, "temp_gingivitis_model")
+        final_results_dir = os.path.join(script_dir, "final_result")
+
+        os.makedirs(final_results_dir, exist_ok=True)
+
+        try:
+            image_files = [f for f in os.listdir(original_input_dir)
+                           if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))]
+
+            print(f"Creating final results with green overlay for {len(image_files)} images...")
+
+            for img_file in image_files:
+                img_path = os.path.join(original_input_dir, img_file)
+                mask_name = os.path.splitext(img_file)[0] + ".png"
+                mask_path = os.path.join(gingivitis_masks_dir, mask_name)
+
+                if not os.path.exists(mask_path):
+                    print(f"Warning: No mask found for {img_file}, copying original")
+                    img = Image.open(img_path)
+                    output_path = os.path.join(final_results_dir, img_file)
+                    img.save(output_path)
+                    continue
+
+                img = Image.open(img_path).convert("RGB")
+                mask = Image.open(mask_path).convert("L")
+
+                if img.size != mask.size:
+                    mask = mask.resize(img.size, Image.LANCZOS)
+
+                img_array = np.array(img)
+                mask_array = np.array(mask)
+
+                white_pixels = mask_array > 127
+
+                overlay = img_array.copy()
+                overlay[white_pixels] = [0, 255, 0]
+
+                alpha = 0.4
+                result = img_array.copy()
+                result[white_pixels] = (alpha * overlay[white_pixels] +
+                                        (1 - alpha) * img_array[white_pixels]).astype(np.uint8)
+
+                result_img = Image.fromarray(result)
+                output_path = os.path.join(final_results_dir, img_file)
+                result_img.save(output_path)
+
+            print(f"Final results saved to: {final_results_dir}")
+            return True
+
+        except Exception as e:
+            print(f"Error creating final results: {str(e)}")
+            messagebox.showerror("Final Results Error", f"Failed to create final results:\n{str(e)}")
+            return False
+
+    def _cleanup_temp_directories(self):
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        temp_dirs = [
+            os.path.join(script_dir, "temp_teeth_model"),
+            os.path.join(script_dir, "temp_relevant_images"),
+            os.path.join(script_dir, "temp_gingivitis_model")
+        ]
+
+        try:
+            for temp_dir in temp_dirs:
+                if os.path.exists(temp_dir):
+                    shutil.rmtree(temp_dir)
+                    print(f"Deleted temporary directory: {temp_dir}")
+
+            print("Cleanup completed successfully")
+            return True
+
+        except Exception as e:
+            print(f"Warning: Could not clean up some temporary directories: {str(e)}")
+            return False
+
     def _submit_path(self):
         path = self.path_var.get()
         if path:
@@ -245,9 +324,12 @@ class GingivitisApp:
 
                     if self._run_model(path, "Teeth_model_weights.pth"):
                         if self._run_get_relevant(path):
-                            temp_relevant_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp_relevant_images")
+                            temp_relevant_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                             "temp_relevant_images")
                             if self._run_model(temp_relevant_dir, "Gingivitis_model_weights.pth"):
-                                messagebox.showinfo("Success", "Processing completed successfully!")
+                                if self._create_final_results(path):
+                                    self._cleanup_temp_directories()
+                                    messagebox.showinfo("Success", "Processing completed successfully!")
 
             except Exception as e:
                 messagebox.showerror("Error", f"An error occurred: {str(e)}")
