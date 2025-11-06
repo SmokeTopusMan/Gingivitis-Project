@@ -17,11 +17,123 @@ class GingivitisApp:
         self.root.configure(bg="#f5f5f5")
         self.root.resizable(False, False)
 
+        self._check_dependencies()
+
         self._set_icon()
 
         self.path_var = tk.StringVar()
 
         self._create_widgets()
+
+    def _check_dependencies(self):
+        required_packages = {
+            'torch': 'torch',
+            'torchvision': 'torchvision',
+            'segmentation_models_pytorch': 'segmentation-models-pytorch',
+            'albumentations': 'albumentations',
+            'cv2': 'opencv-python',
+            'PIL': 'Pillow',
+            'numpy': 'numpy'
+        }
+
+        missing_packages = []
+        for import_name, pip_name in required_packages.items():
+            try:
+                __import__(import_name)
+            except ImportError:
+                missing_packages.append(pip_name)
+
+        if missing_packages:
+            self._show_dependency_install_dialog(missing_packages)
+
+    def _show_dependency_install_dialog(self, missing_packages):
+        response = messagebox.askyesno(
+            "Missing Dependencies",
+            f"The following required packages are missing:\n\n" +
+            "\n".join(f"• {pkg}" for pkg in missing_packages) +
+            f"\n\nWould you like to install them now?\n\n"
+            f"This may take several minutes and requires an internet connection."
+        )
+
+        if response:
+            self._install_dependencies(missing_packages)
+        else:
+            messagebox.showwarning(
+                "Cannot Continue",
+                "The application requires these dependencies to function.\n"
+                "The app will now close."
+            )
+            self.root.destroy()
+            sys.exit(1)
+
+    def _install_dependencies(self, packages):
+        progress_window = tk.Toplevel(self.root)
+        progress_window.title("Installing Dependencies")
+        progress_window.geometry("500x200")
+        progress_window.configure(bg="#f5f5f5")
+        progress_window.resizable(False, False)
+
+        progress_window.transient(self.root)
+        progress_window.grab_set()
+
+        label = tk.Label(
+            progress_window,
+            text="Installing required dependencies...\nPlease wait, this may take several minutes.",
+            font=("Segoe UI", 11),
+            bg="#f5f5f5",
+            fg="#2c3e50"
+        )
+        label.pack(pady=30)
+
+        status_label = tk.Label(
+            progress_window,
+            text="Starting installation...",
+            font=("Segoe UI", 9),
+            bg="#f5f5f5",
+            fg="#7f8c8d"
+        )
+        status_label.pack(pady=10)
+
+        def install():
+            try:
+                for idx, package in enumerate(packages, 1):
+                    status_label.config(text=f"Installing {package} ({idx}/{len(packages)})...")
+                    progress_window.update()
+
+                    result = subprocess.run(
+                        [sys.executable, "-m", "pip", "install", package],
+                        capture_output=True,
+                        text=True,
+                        timeout=300
+                    )
+
+                    if result.returncode != 0:
+                        raise Exception(f"Failed to install {package}: {result.stderr}")
+
+                status_label.config(text="Installation complete!")
+                progress_window.update()
+
+                messagebox.showinfo(
+                    "Success",
+                    "All dependencies have been installed successfully!\n\n"
+                    "Please restart the application."
+                )
+                progress_window.destroy()
+                self.root.destroy()
+                sys.exit(0)
+
+            except Exception as e:
+                progress_window.destroy()
+                messagebox.showerror(
+                    "Installation Failed",
+                    f"Failed to install dependencies:\n\n{str(e)}\n\n"
+                    f"Please install manually using:\n"
+                    f"pip install {' '.join(packages)}"
+                )
+                self.root.destroy()
+                sys.exit(1)
+
+        self.root.after(100, install)
 
     def _set_icon(self):
         try:
