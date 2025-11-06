@@ -147,14 +147,18 @@ class GingivitisApp:
                     total_size += os.path.getsize(filepath)
         return total_size
 
-    def _run_teeth_extraction(self, input_dir):
+    def _run_model(self, input_dir, weights):
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        temp_dir = os.path.join(script_dir, "temp_teeth_model")
-        os.makedirs(temp_dir, exist_ok=True)
-
         project_root = os.path.dirname(script_dir)
-        weights_path = os.path.join(project_root, "weights&results", "Teeth_model_weights.pth")
-        teeth_extraction_script = os.path.join(project_root, "tools", "teeth_extraction.py")
+        if weights == "Teeth_model_weights.pth":
+            temp_dir = os.path.join(script_dir, "temp_teeth_model")
+            weights_path = os.path.join(project_root, "weights&results", "Teeth_model_weights.pth")
+        else:
+            temp_dir = os.path.join(script_dir, "temp_gingivitis_model")
+            weights_path = os.path.join(project_root, "weights&results", "Gingivitis_model_weights.pth")
+
+        os.makedirs(temp_dir, exist_ok=True)
+        teeth_extraction_script = os.path.join(project_root, "tools", "run_model.py")
 
         cmd = [
             sys.executable,
@@ -239,10 +243,11 @@ class GingivitisApp:
                 else:
                     print(f"Directory path submitted: {path}")
 
-                    if self._run_teeth_extraction(path):
-                        print("Teeth extraction completed, now running get_relevant...")
+                    if self._run_model(path, "Teeth_model_weights.pth"):
                         if self._run_get_relevant(path):
-                            messagebox.showinfo("Success", "Processing completed successfully!")
+                            temp_relevant_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp_relevant_images")
+                            if self._run_model(temp_relevant_dir, "Gingivitis_model_weights.pth"):
+                                messagebox.showinfo("Success", "Processing completed successfully!")
 
             except Exception as e:
                 messagebox.showerror("Error", f"An error occurred: {str(e)}")

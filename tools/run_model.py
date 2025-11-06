@@ -114,10 +114,10 @@ def predict_large_image(
     return final_mask[:H, :W]
 
 
-def load_model(weights_path, device):
+def load_model(weights_path, device, encoder_name="resnet34", encoder_weights="imagenet"):
     model = smp.UnetPlusPlus(
-        encoder_name="resnet34",
-        encoder_weights="imagenet",
+        encoder_name=encoder_name,
+        encoder_weights=encoder_weights,
         in_channels=3,
         classes=1,
     ).to(device)
@@ -136,18 +136,24 @@ def is_image_file(name):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="UNet++ Teeth Segmentation - Inference Script\n\n"
-                    "This script uses trained UNet++ model weights to predict teeth masks from dental images.\n"
+        description="UNet++ General Segmentation - Inference Script\n\n"
+                    "This script uses trained UNet++ model weights to predict segmentation masks from images.\n"
+                    "Works with any UNet++ model (teeth, gingivitis, or other segmentation tasks).\n"
                     "It processes all images in an input folder using sliding window inference with optional TTA.\n\n"
                     "Example usage:\n"
-                    "  Basic:  python teeth_extraction.py --weights model.pth --input ./images --output ./masks\n"
-                    "  With TTA: python teeth_extraction.py --weights model.pth --input ./images --output ./masks --tta\n"
-                    "  Custom params: python teeth_extraction.py --weights model.pth --input ./images --output ./masks --crop-size 1024 --stride 512 --threshold 0.6\n\n",
+                    "  Basic:  python unetpp_inference.py --weights model.pth --input ./images --output ./masks\n"
+                    "  With custom encoder: python unetpp_inference.py --weights model.pth --input ./images --output ./masks --encoder resnet50\n"
+                    "  With TTA: python unetpp_inference.py --weights model.pth --input ./images --output ./masks --tta\n"
+                    "  Custom params: python unetpp_inference.py --weights model.pth --input ./images --output ./masks --crop-size 1024 --stride 512 --threshold 0.6\n\n",
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--weights", required=True, help="Path to trained model weights file (e.g., best_model.pth)")
-    parser.add_argument("--input", required=True, help="Directory containing input dental images")
+    parser.add_argument("--weights", required=True, help="Path to trained model weights file (.pth)")
+    parser.add_argument("--input", required=True, help="Directory containing input images")
     parser.add_argument("--output", required=True, help="Directory where predicted masks will be saved")
+    parser.add_argument("--encoder", type=str, default="resnet34", 
+                        help="Encoder architecture (default: resnet34). Options: resnet18, resnet34, resnet50, resnet101, efficientnet-b0, etc.")
+    parser.add_argument("--encoder-weights", type=str, default="imagenet",
+                        help="Encoder pretrained weights (default: imagenet). Use 'None' for no pretraining.")
     parser.add_argument("--crop-size", type=int, default=512, help="Size of sliding window crops (default: 512)")
     parser.add_argument("--stride", type=int, default=256,
                         help="Stride for sliding window (default: 256, smaller = more overlap)")
@@ -169,7 +175,10 @@ def main():
     else:
         print("Using CPU")
 
-    model = load_model(args.weights, device)
+    encoder_weights_arg = None if args.encoder_weights.lower() == 'none' else args.encoder_weights
+    
+    print(f"Loading model with encoder: {args.encoder}, pretrained on: {encoder_weights_arg or 'random initialization'}")
+    model = load_model(args.weights, device, encoder_name=args.encoder, encoder_weights=encoder_weights_arg)
     model.eval()
 
     files = [f for f in sorted(os.listdir(args.input)) if is_image_file(f)]
