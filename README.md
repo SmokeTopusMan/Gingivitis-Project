@@ -36,4 +36,4 @@ python3 main_screen.py
 
 ## Authors  
 - Amir Sorani  
-- Daniel Yehosha  
+- Daniel Yehoshua  
