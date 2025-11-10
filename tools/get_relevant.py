@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 import cv2
 import os
@@ -167,7 +168,7 @@ def components_from_mask(
     y_connect: bool = True,     # <-- enable y-level connectivity
     y_gap: int = 0,             # rows of tolerance when merging (e.g. 0–3)
     bridge_px: int = 0,         # optional closing to bridge tiny cracks first
-    min_area_frac: float = 0.01 # <-- NEW: drop comps smaller than 1% of image
+    min_area_frac: float = 0.07 # <-- NEW: drop comps smaller than 1% of image
 ):
     """
     Returns components with X/Y spans. If y_connect=True, components whose
@@ -338,6 +339,43 @@ def middle_band_by_row_test(white_mask: np.ndarray,
 
 
 
+def keep_main_teeth_components(
+    white_mask: np.ndarray,
+    max_components: int = 2,
+    min_area_frac: float = 0.05,
+) -> np.ndarray:
+    """
+    Keep only up to `max_components` largest connected components
+    with area >= min_area_frac * image_area.
+    Everything else (small noisy blobs far away, like the top of 275.png)
+    is removed from the mask.
+    """
+    m = white_mask.astype(np.uint8)
+    H, W = m.shape
+    total_area = H * W
+    min_area = int(min_area_frac * total_area)
+
+    num, labels, stats, _ = cv2.connectedComponentsWithStats(m, connectivity=8)
+    if num <= 1:
+        return white_mask
+
+    # areas & labels for real components (skip background 0)
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    order = np.argsort(areas)[::-1]  # largest first
+
+    keep = np.zeros_like(m)
+    kept = 0
+    for idx in order:
+        lab = idx + 1
+        area = areas[idx]
+        if area < min_area:
+            break  # remaining ones only smaller
+        keep[labels == lab] = 1
+        kept += 1
+        if kept >= max_components:
+            break
+
+    return keep.astype(bool)
 
 
 
@@ -365,7 +403,7 @@ def hull_concavity_scores(white_mask, comp, band_frac=0.35, min_gap_h_frac=0.10)
     keep = np.zeros_like(g, dtype=np.uint8)
     for i in range(1, nlab):
         ys, xs = np.where(lab == i)
-        if ys.size == 0: 
+        if ys.size == 0:
             continue
         if (ys.max() - ys.min() + 1) >= min_gap_h:
             keep[ys, xs] = 1
@@ -401,7 +439,14 @@ def cut_to_the_chase_efficient(image_path, mask_path):
     base_name = os.path.basename(image_path)
 
     white_mask = binarize_mask(mask, use_otsu=True)   # or use_otsu=False, thr=128..200 if you prefer
-    
+    white_mask = ensure_object_is_white(white_mask)
+
+# Remove tiny components so top noise cannot affect bands / hull / etc.
+    white_mask = keep_main_teeth_components(
+    white_mask,
+    max_components=2,      # upper + lower teeth
+    min_area_frac=0.01     # only components ≥ 1% of image area survive
+)
 # NEW: try to split by the row-bridge rule
 # --- optional split by row-bridge rule (your function) ---
     white_mask_for_cc, split_y = split_mask_if_row_bridge(white_mask, width_frac=0.10, both_frac=0.50)
@@ -463,7 +508,7 @@ def cut_to_the_chase_efficient(image_path, mask_path):
 )
 
             tau_area = max(50, int(0.002 * comp.xspan() * comp.yspan()))  # small safety floor
-            close=0.2
+            close=0.6666
             picked =None
             if max(top_cvx, bot_cvx) >= tau_area:
                 if abs(top_cvx - bot_cvx) <= close * max(top_cvx, bot_cvx):
@@ -473,7 +518,7 @@ def cut_to_the_chase_efficient(image_path, mask_path):
 
             if picked is None:
                 picked = 'both'
-    
+
 # 3) build the mask to keep
             if picked == 'both' or picked == 'none':          # keep both when tie/none
                 chosen_bg = near_bg
@@ -485,7 +530,7 @@ def cut_to_the_chase_efficient(image_path, mask_path):
                 chosen_bg = near_bg & bot_mask
 
             pixels_to_black_out = ~chosen_bg | extra_black
-            
+
     keep_count = np.sum(~pixels_to_black_out)
     print(f"Keeping {keep_count} pixels; cutcount={cutcount} (h={h}, w={w})")
 
@@ -558,18 +603,19 @@ def main():
 
         print(f"[{i}/{len(image_files)}] {filename}")
         if not (os.path.isfile(img_path) and mask_path and os.path.isfile(mask_path)):
-            print(f"Skipping {filename} - missing image or mask (tried: {mask_path})")
+            print(f"[!] Skipping {filename} - missing image or mask (tried: {mask_path})")
             continue
 
         try:
             cut_to_the_chase_efficient(img_path, mask_path)
             # or cut_to_the_chase_chunked(img_path, mask_path)
-            print(f"Completed {filename}")
+            print(f"[✓] Completed {filename}")
         except Exception as e:
-            print(f"Error processing {filename}: {e}")
+            print(f"[✗] Error processing {filename}: {e}")
 
         gc.collect()
 
 if __name__ == "__main__":
 
     main()
+
