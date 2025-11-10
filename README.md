@@ -8,7 +8,7 @@ This project implements a segmented‑deep‑learning pipeline using U‑Net++ t
 
 ### Part 1 – Installing Python Interpreter (Skip this part if already installed)  
 1. Visit [python.org/downloads](https://www.python.org/downloads/) to download the latest stable Python 3 release. ([python.org](https://www.python.org/downloads/?utm_source=chatgpt.com))  
-2. At the time of writing, you should use **Python 3.13.x** (for example, Python 3.13.7) as your interpreter version. ([python.org](https://www.python.org/downloads/release/python-3137/?utm_source=chatgpt.com))  
+2. You should use **Python 3.13.x** (for example, Python 3.13.7) as your interpreter version. ([python.org](https://www.python.org/downloads/release/python-3137/?utm_source=chatgpt.com))  
 3. Install Python and ensure that the `python3` (or `python`) command is available in your terminal or command‑prompt.  
 4. Verify your installation by running:  
    ```bash  
