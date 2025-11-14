@@ -1,5 +1,5 @@
 import os
-import argparse
+import sys
 import numpy as np
 from PIL import Image
 import torch
@@ -167,7 +167,29 @@ def main():
                         help="Disable Gaussian blending of overlapping crops (use uniform weights)")
     args = parser.parse_args()
 
-    os.makedirs(args.output, exist_ok=True)
+    # Required arguments
+    weights_path = sys.argv[1]
+    input_folder = sys.argv[2]
+    output_folder = sys.argv[3]
+
+    # Optional arguments with defaults
+    crop_size = int(sys.argv[4]) if len(sys.argv) > 4 else 512
+    stride = int(sys.argv[5]) if len(sys.argv) > 5 else 256
+    batch_size = int(sys.argv[6]) if len(sys.argv) > 6 else 4
+    threshold = float(sys.argv[7]) if len(sys.argv) > 7 else 0.5
+    use_tta = bool(int(sys.argv[8])) if len(sys.argv) > 8 else False
+    no_gauss = bool(int(sys.argv[9])) if len(sys.argv) > 9 else False
+
+    # Validate paths
+    if not os.path.exists(weights_path):
+        print(f"Error: Weights file not found: {weights_path}")
+        sys.exit(1)
+
+    if not os.path.exists(input_folder):
+        print(f"Error: Input folder not found: {input_folder}")
+        sys.exit(1)
+
+    os.makedirs(output_folder, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if torch.cuda.is_available():
@@ -181,12 +203,12 @@ def main():
     model = load_model(args.weights, device, encoder_name=args.encoder, encoder_weights=encoder_weights_arg)
     model.eval()
 
-    files = [f for f in sorted(os.listdir(args.input)) if is_image_file(f)]
-    print(f"Found {len(files)} images in {args.input}")
+    files = [f for f in sorted(os.listdir(input_folder)) if is_image_file(f)]
+    print(f"Found {len(files)} images in {input_folder}\n")
 
     for idx, fname in enumerate(files, 1):
-        in_path = os.path.join(args.input, fname)
-        out_path = os.path.join(args.output, fname.rsplit('.', 1)[0] + ".png")
+        in_path = os.path.join(input_folder, fname)
+        out_path = os.path.join(output_folder, fname.rsplit('.', 1)[0] + ".png")
 
         try:
             pil_img = Image.open(in_path).convert("RGB")
@@ -196,19 +218,19 @@ def main():
                 pil_img,
                 model,
                 device,
-                crop_size=args.crop_size,
-                stride=args.stride,
-                batch_size=args.batch_size,
-                threshold=args.threshold,
-                use_tta=args.tta,
-                use_gaussian_weights=not args.no_gauss
+                crop_size=crop_size,
+                stride=stride,
+                batch_size=batch_size,
+                threshold=threshold,
+                use_tta=use_tta,
+                use_gaussian_weights=not no_gauss
             )
 
             Image.fromarray(mask).save(out_path)
         except Exception as e:
             print(f"  [!] Error on {fname}: {e}")
 
-    print(f"Done. Masks saved to: {args.output}")
+    print(f"\nDone. Masks saved to: {output_folder}")
 
 
 if __name__ == "__main__":
