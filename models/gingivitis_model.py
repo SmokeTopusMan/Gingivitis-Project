@@ -28,11 +28,20 @@ def setup_dist():
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         return False, 0, 0, 1, device
 
+<<<<<<< HEAD
+=======
+    # Required env when using torchrun (set automatically):
+    # RANK, LOCAL_RANK, WORLD_SIZE, MASTER_ADDR, MASTER_PORT
+>>>>>>> updated ging_model.py
     rank = int(os.environ["RANK"])
     local_rank = int(os.environ["LOCAL_RANK"])
 
     torch.cuda.set_device(local_rank)
 
+<<<<<<< HEAD
+=======
+    # Initialize the default process group (NCCL for multi-GPU CUDA)
+>>>>>>> updated ging_model.py
     dist.init_process_group(backend="nccl", init_method="env://")
 
     device = torch.device(f"cuda:{local_rank}")
@@ -42,7 +51,7 @@ IS_DIST, RANK, LOCAL_RANK, WORLD_SIZE, DEVICE = setup_dist()
 IS_MAIN = (RANK == 0)
 def is_pure_black_rgb(crop_rgb, thr=3, min_fraction=0.999):
     """
-    Return True if at least `min_fraction` of pixels have all channels <= thr.
+    Return True if at least  of pixels have all channels <= thr.
     crop_rgb: HxWx3 uint8
     thr: intensity threshold (0..255). 3 is tolerant to tiny noise.
     """
@@ -354,7 +363,11 @@ def validate_model(model, val_loader, loss_fn, device, thr=0.5):
             masks  = masks.to(device, non_blocking=True).unsqueeze(1).float()
 
             logits = model(images)
+<<<<<<< HEAD
             loss_weighted = weighted_dice_loss_from_logits(logits, masks,weight_pos=3.0,weight_neg=1.0)
+=======
+            loss_weighted = weighted_dice_loss_from_logits(logits, masks,weight_pos=2.0,weight_neg=1.0)
+>>>>>>> updated ging_model.py
             val_loss_sum += float(loss_weighted.item())
             n_batches += 1
 
@@ -363,12 +376,20 @@ def validate_model(model, val_loader, loss_fn, device, thr=0.5):
             dice_pos_sum += float(dice_pos_b.item()) if num_pos_b > 0 else 0.0
             pos_img_count += int(num_pos_b)
 
+<<<<<<< HEAD
+=======
+    # DDP reduce
+>>>>>>> updated ging_model.py
     n_batches    = ddp_all_reduce_int(n_batches, device)
     dice_all_sum = ddp_all_reduce_scalar(dice_all_sum, device)
     dice_pos_sum = ddp_all_reduce_scalar(dice_pos_sum, device)
     pos_img_count = ddp_all_reduce_int(pos_img_count, device)
     avg_val_loss_weighted=ddp_all_reduce_scalar(val_loss_sum,device) / max(1, n_batches)
+<<<<<<< HEAD
     
+=======
+
+>>>>>>> updated ging_model.py
     avg_dice_all = dice_all_sum / max(1, n_batches)
     avg_dice_pos = (dice_pos_sum / max(1, pos_img_count)) if pos_img_count > 0 else 0.0
 
@@ -430,7 +451,12 @@ val_transform = A.Compose([
     ToTensorV2(),
 ], additional_targets={"mask": "mask"})
 
+<<<<<<< HEAD
 full_dataset = SegmentationDataset("downloads/train/crops_images", "downloads/train/mask_crops_images", train_transform)
+=======
+# Create full dataset
+full_dataset = SegmentationDataset("downloads/train/augmented_images", "downloads/train/mask_augmented_images", train_transform)
+>>>>>>> updated ging_model.py
 
 train_size = int(0.8 * len(full_dataset))
 val_size = len(full_dataset) - train_size
@@ -438,6 +464,7 @@ print(f"Dataset split: {train_size} training, {val_size} validation")
 
 train_dataset, val_indices = random_split(full_dataset, [train_size, val_size])
 
+<<<<<<< HEAD
 val_dataset = SegmentationDataset("downloads/train/crops_images", "downloads/train/mask_crops_images", val_transform)
 val_dataset.images = [full_dataset.images[i] for i in val_indices.indices]
 from torch.utils.data.distributed import DistributedSampler
@@ -455,20 +482,52 @@ val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False,
                         num_workers=2, pin_memory=True,
                         persistent_workers=True, prefetch_factor=2)
 
+=======
+# Create validation dataset with different transform
+val_dataset = SegmentationDataset("downloads/train/augmented_images", "downloads/train/mask_augmented_images", val_transform)
+val_dataset.images = [full_dataset.images[i] for i in val_indices.indices]
+from torch.utils.data.distributed import DistributedSampler
+
+if IS_DIST:
+    train_sampler = DistributedSampler(train_dataset, shuffle=True, drop_last=False)
+    train_loader = DataLoader(train_dataset, batch_size=4, sampler=train_sampler,
+                              num_workers=2, pin_memory=True, persistent_workers=True)
+else:
+    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True,
+                              num_workers=2, pin_memory=True,
+                              persistent_workers=True, prefetch_factor=2)
+
+# Validation loader can stay regular (or use Dist sampler + only aggregate on rank 0)
+val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False,
+                        num_workers=2, pin_memory=True,
+                        persistent_workers=True, prefetch_factor=2)
+# Data loaders
+
+# Move model to GPU
+>>>>>>> updated ging_model.py
 loss_fn = smp.losses.DiceLoss("binary")
 optimizer = optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-5)  # Added weight decay
-scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, factor=0.5, verbose=True)
+scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, factor=0.5,threshold=1e-4, verbose=True)
 
+<<<<<<< HEAD
 num_epochs = 25
+=======
+# Training setup
+num_epochs = 50
+>>>>>>> updated ging_model.py
 best_val_dice = 0.0
-patience = 25
+patience = 500
 patience_counter = 0
 early_stop = False
 # ===== Metrics helpers =====
 def weighted_dice_loss_from_logits(
     logits: torch.Tensor,
     targets: torch.Tensor,
+<<<<<<< HEAD
     weight_pos: float = 3.0,
+=======
+    weight_pos: float = 2.0,
+>>>>>>> updated ging_model.py
     weight_neg: float = 1.0,
     eps: float = 1e-7,
 ):
@@ -481,16 +540,27 @@ def weighted_dice_loss_from_logits(
 
     intersection = (p_flat * t_flat).sum(dim=1)
     union = p_flat.sum(dim=1) + t_flat.sum(dim=1)
+<<<<<<< HEAD
 
     dice = (2.0 * intersection + eps) / (union + eps)      
     per_img_loss = 1.0 - dice                              
 
+=======
+
+    dice = (2.0 * intersection + eps) / (union + eps)      # [N]
+    per_img_loss = 1.0 - dice                              # [N]
+
+>>>>>>> updated ging_model.py
     # image is "positive" if GT has any positive pixel
     has_pos = (t_flat.sum(dim=1) > 0)
 
     w_pos = torch.full_like(per_img_loss, weight_pos)
     w_neg = torch.full_like(per_img_loss, weight_neg)
+<<<<<<< HEAD
     weights = torch.where(has_pos, w_pos, w_neg)          
+=======
+    weights = torch.where(has_pos, w_pos, w_neg)           # [N]
+>>>>>>> updated ging_model.py
 
     loss = (per_img_loss * weights).sum() / (weights.sum() + eps)
     return loss
@@ -536,6 +606,10 @@ def ddp_all_reduce_int(value: int, device: torch.device):
         torch.distributed.all_reduce(t, op=torch.distributed.ReduceOp.SUM)
         return int(t.item())
     return int(value)
+<<<<<<< HEAD
+=======
+# For plotting
+>>>>>>> updated ging_model.py
 train_losses = []
 val_losses = []
 train_dice_scores = []
@@ -560,15 +634,28 @@ train_sampler = DistributedSampler(train_dataset, shuffle=True, drop_last=False)
 train_loader = DataLoader(train_dataset, batch_size=4, sampler=train_sampler,
                           num_workers=2, pin_memory=True, persistent_workers=True)
 
+<<<<<<< HEAD
 
 is_main = (RANK == 0)
 if is_main:
     torch.save(model.module.state_dict(), "best_model.pth")  
+=======
+# For validation you can keep a regular DataLoader, or use another DistributedSampler and
+# compute metrics on rank 0 only. Example: only save/print on rank 0:
+is_main = (RANK == 0)
+if is_main:
+    torch.save(model.module.state_dict(), "best_model.pth")  # note model.module under DDP
+# --- inside epoch loop before iterating train_loader ---
+>>>>>>> updated ging_model.py
 train_loss_sum = 0.0
 train_batches = 0
 train_dice_all_sum = 0.0
 train_dice_pos_sum = 0.0
 train_pos_img_count = 0
+<<<<<<< HEAD
+=======
+# Use a DistributedSampler for training
+>>>>>>> updated ging_model.py
 train_sampler = DistributedSampler(train_dataset, shuffle=True, drop_last=False)
 train_loader = DataLoader(train_dataset, batch_size=4,
                           sampler=train_sampler, num_workers=2, pin_memory=True,
@@ -576,6 +663,10 @@ train_loader = DataLoader(train_dataset, batch_size=4,
 def get_state_dict(m):
     return m.module.state_dict() if isinstance(m, DDP) else m.state_dict()
 
+<<<<<<< HEAD
+=======
+# remember each epoch:
+>>>>>>> updated ging_model.py
 for epoch in range(num_epochs):
     if IS_DIST:
         train_sampler.set_epoch(epoch)
@@ -599,7 +690,11 @@ for epoch in range(num_epochs):
         masks = masks.to(device, non_blocking=True).unsqueeze(1).float()
 
         preds = model(images)
+<<<<<<< HEAD
         loss = weighted_dice_loss_from_logits(preds, masks,weight_pos=3.0,weight_neg=1.0)
+=======
+        loss = weighted_dice_loss_from_logits(preds, masks,weight_pos=2.0,weight_neg=1.0)
+>>>>>>> updated ging_model.py
 
         optimizer.zero_grad()
         loss.backward()
@@ -613,6 +708,10 @@ for epoch in range(num_epochs):
 
         train_loss_sum += float(loss.item())
         train_batches += 1
+<<<<<<< HEAD
+=======
+        # Statistics
+>>>>>>> updated ging_model.py
         train_loss += loss.item()
         batch_count += 1
 
@@ -630,10 +729,20 @@ for epoch in range(num_epochs):
     avg_train_loss = train_loss / len(train_loader)
     avg_train_dice = train_dice_sum / len(train_loader)
 
+<<<<<<< HEAD
     avg_val_loss_weighted, avg_val_dice_all, avg_val_dice_pos, val_pos_count = validate_model(model, val_loader, loss_fn, device, thr=0.5)
 
     scheduler.step(avg_val_loss_weighted)
 
+=======
+    # Validation phase
+    avg_val_loss_weighted, avg_val_dice_all, avg_val_dice_pos, val_pos_count = validate_model(model, val_loader, loss_fn, device, thr=0.5)
+
+    # Learning rate scheduling
+    scheduler.step(avg_val_loss_weighted)
+
+    # DDP reduce training metrics
+>>>>>>> updated ging_model.py
     train_loss_sum = ddp_all_reduce_scalar(train_loss_sum, device)
     train_batches  = ddp_all_reduce_int(train_batches, device)
     train_dice_all_sum = ddp_all_reduce_scalar(train_dice_all_sum, device)
@@ -643,6 +752,10 @@ for epoch in range(num_epochs):
     avg_train_loss = train_loss_sum / max(1, train_batches)
     avg_train_dice_all = train_dice_all_sum / max(1, train_batches)
     avg_train_dice_pos = (train_dice_pos_sum / max(1, train_pos_img_count)) if train_pos_img_count > 0 else 0.0
+<<<<<<< HEAD
+=======
+    # Print epoch summary
+>>>>>>> updated ging_model.py
     print(f"  Train Loss: {avg_train_loss:.4f}, Train Dice: {avg_train_dice:.4f}")
     print(f"  Val weighted Loss:   {avg_val_loss_weighted:.4f}, Val Dice:   {avg_val_dice_all:.4f}")
     print(f"  Loss Gap:   {avg_val_loss_weighted - avg_train_loss:.4f}")
@@ -652,17 +765,30 @@ for epoch in range(num_epochs):
 
     train_losses.append(avg_train_loss)
     val_losses.append(avg_val_loss_weighted)
+<<<<<<< HEAD
     train_dice_scores.append(avg_train_dice_all)   
     val_dice_scores.append(avg_val_dice_all)
     train_pos_dice_scores.append(avg_train_dice_pos)  
     val_pos_dice_scores.append(avg_val_dice_pos)
     val_pos_counts.append(val_pos_count)
+=======
+    train_dice_scores.append(avg_train_dice_all)   # keep your existing arrays for 'all'
+    val_dice_scores.append(avg_val_dice_all)
+    train_pos_dice_scores.append(avg_train_dice_pos)  # new arrays for 'pos'
+    val_pos_dice_scores.append(avg_val_dice_pos)
+    val_pos_counts.append(val_pos_count)
+    # Check for overfitting
+>>>>>>> updated ging_model.py
     loss_gap = avg_val_loss_weighted - avg_train_loss
     if loss_gap > 0.3:
         print("  ⚠️  OVERFITTING DETECTED! (Loss gap > 0.3)")
     elif loss_gap > 0.15:
         print("  ⚠️  Possible overfitting (Loss gap > 0.15)")
+<<<<<<< HEAD
     key_metric = avg_val_dice_pos  
+=======
+    key_metric = avg_val_dice_pos  # or avg_val_dice_all
+>>>>>>> updated ging_model.py
     if key_metric > best_val_dice:
         best_val_dice = key_metric
         patience_counter = 0
@@ -671,7 +797,13 @@ for epoch in range(num_epochs):
             print(f"  ✓ New best Val Dice(pos): {best_val_dice:.4f} - Model saved!")
     else:
         patience_counter += 1
+<<<<<<< HEAD
     key_metric = avg_val_dice_pos  
+=======
+    # Early stopping and model saving
+    # ...
+    key_metric = avg_val_dice_pos  # your chosen key metric
+>>>>>>> updated ging_model.py
     if key_metric > best_val_dice and IS_MAIN:
         best_val_dice = key_metric
         patience_counter = 0
@@ -687,9 +819,17 @@ for epoch in range(num_epochs):
 print("\nTraining completed!")
 print(f"Best validation Dice score: {best_val_dice:.4f}")
 
+<<<<<<< HEAD
 plot_training_history(train_losses, val_losses,
                           train_dice_scores, val_dice_scores,
                           train_pos_dice_scores, val_pos_dice_scores)
+=======
+# Plot training history
+plot_training_history(train_losses, val_losses,
+                          train_dice_scores, val_dice_scores,
+                          train_pos_dice_scores, val_pos_dice_scores)
+# Load best model for testing
+>>>>>>> updated ging_model.py
 print("\nLoading best model for testing...")
 model.load_state_dict(torch.load("best_model_ging.pth"))
 
@@ -710,6 +850,10 @@ class TestDatasetOriginalSize(Dataset):
         mask = Image.open(os.path.join(self.masks_dir, img_name)).convert("L")
         return image, mask, img_name
 
+<<<<<<< HEAD
+=======
+# Create dataset but iterate directly (no DataLoader to avoid PIL Image batching issues)
+>>>>>>> updated ging_model.py
 test_dataset = TestDatasetOriginalSize("downloads/test/relevant_images", "downloads/test/masks")
 
 print(f"Test dataset created with {len(test_dataset)} images (original sizes preserved)")
@@ -753,18 +897,34 @@ with torch.no_grad():
         mask_tensor = torch.from_numpy((mask_np > 127).astype('float32')).unsqueeze(0).float()
         mask_tensor = mask_tensor.to(device)
         pred_tensor = pred_tensor.to(device)
+<<<<<<< HEAD
+=======
+        # Per-image Dice (all)
+>>>>>>> updated ging_model.py
         intersection = (pred_tensor * mask_tensor).sum()
         union = pred_tensor.sum() + mask_tensor.sum()
         dice_all_img = (2. * intersection) / (union + 1e-7)
 
+<<<<<<< HEAD
+=======
+# Per-image Dice (positive-only: count only if GT has any positives)
+>>>>>>> updated ging_model.py
         gt_pos = (mask_tensor.sum() > 0)
         if gt_pos:
             dice_pos_img = dice_all_img
         else:
+<<<<<<< HEAD
             dice_pos_img = None  
 
         dice_scores.append(float(dice_all_img.item()))
         if gt_pos:
+=======
+            dice_pos_img = None  # not counted
+
+        dice_scores.append(float(dice_all_img.item()))
+        if gt_pos:
+    # you'll want a separate list
+>>>>>>> updated ging_model.py
             try:
                 dice_scores_pos.append(float(dice_pos_img.item()))
             except NameError:
@@ -830,4 +990,7 @@ print("pred = predict_large_image_memory_efficient(image, model, device, max_mem
 if IS_DIST:
     dist.barrier()
     dist.destroy_process_group()
+<<<<<<< HEAD
     
+=======
+>>>>>>> updated ging_model.py
