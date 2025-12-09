@@ -343,14 +343,16 @@ class GingivitisApp:
         os.makedirs(final_results_dir, exist_ok=True)
 
         try:
+            import cv2
+
             image_files = [f for f in os.listdir(original_input_dir)
                            if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))]
 
-            print(f"Creating final results with green overlay for {len(image_files)} images...")
+            print(f"Creating final results with green outline for {len(image_files)} images...")
 
             for img_file in image_files:
                 img_path = os.path.join(original_input_dir, img_file)
-                mask_name = os.path.splitext(img_file)[0] + ".png"
+                mask_name = os.path.splitext(img_file)[0] + ".jpg"
                 mask_path = os.path.join(gingivitis_masks_dir, mask_name)
 
                 if not os.path.exists(mask_path):
@@ -369,15 +371,12 @@ class GingivitisApp:
                 img_array = np.array(img)
                 mask_array = np.array(mask)
 
-                white_pixels = mask_array > 127
+                _, binary_mask = cv2.threshold(mask_array, 127, 255, cv2.THRESH_BINARY)
 
-                overlay = img_array.copy()
-                overlay[white_pixels] = [0, 255, 0]
+                contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-                alpha = 0.4
                 result = img_array.copy()
-                result[white_pixels] = (alpha * overlay[white_pixels] +
-                                        (1 - alpha) * img_array[white_pixels]).astype(np.uint8)
+                cv2.drawContours(result, contours, -1, (0, 255, 0), thickness=3)
 
                 result_img = Image.fromarray(result)
                 output_path = os.path.join(final_results_dir, img_file)

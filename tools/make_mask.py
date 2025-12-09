@@ -42,7 +42,7 @@ def convert_non_white_to_black(path):
 def yolo_polygon_to_mask(txt_path, output_path, img_size):
     """
     Converts YOLO polygon annotation to a binary mask image.
-    Uses YOLO v5/7 PyTorch.
+    Uses "YOLO v5/7 PyTorch".
 
     Args:
         txt_path (str): Path to the .txt annotation file.
