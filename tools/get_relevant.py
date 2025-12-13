@@ -146,9 +146,7 @@ def binarize_mask(mask_gray: np.ndarray, use_otsu: bool = True, thr: int = 128) 
     else:
         white_mask = (mask_gray >= thr)
     return white_mask
-def ensure_object_is_white(white_mask: np.ndarray) -> np.ndarray:
-    # Auto invert if most of the image is "white"
-    return ~white_mask if white_mask.mean() > 0.6 else white_mask
+
 
 
 class CompSpan:
@@ -341,15 +339,9 @@ def middle_band_by_row_test(white_mask: np.ndarray,
 
 def keep_main_teeth_components(
     white_mask: np.ndarray,
-    max_components: int = 2,
-    min_area_frac: float = 0.05,
-) -> np.ndarray:
-    """
-    Keep only up to `max_components` largest connected components
-    with area >= min_area_frac * image_area.
-    Everything else (small noisy blobs far away, like the top of 275.png)
-    is removed from the mask.
-    """
+    max_components: int | None = None,   # allow "no cap"
+    min_area_frac: float = 0.01,
+):
     m = white_mask.astype(np.uint8)
     H, W = m.shape
     total_area = H * W
@@ -359,9 +351,8 @@ def keep_main_teeth_components(
     if num <= 1:
         return white_mask
 
-    # areas & labels for real components (skip background 0)
     areas = stats[1:, cv2.CC_STAT_AREA]
-    order = np.argsort(areas)[::-1]  # largest first
+    order = np.argsort(areas)[::-1]
 
     keep = np.zeros_like(m)
     kept = 0
@@ -369,14 +360,13 @@ def keep_main_teeth_components(
         lab = idx + 1
         area = areas[idx]
         if area < min_area:
-            break  # remaining ones only smaller
+            break               # remaining are smaller than the threshold
         keep[labels == lab] = 1
         kept += 1
-        if kept >= max_components:
+        if max_components is not None and kept >= max_components:
             break
 
     return keep.astype(bool)
-
 
 
 
@@ -414,7 +404,52 @@ def hull_concavity_scores(white_mask, comp, band_frac=0.35, min_gap_h_frac=0.10)
     bot_band = np.zeros_like(g, bool);  bot_band[-band:, :] = True
 
     return int(np.sum(g & top_band)), int(np.sum(g & bot_band))
+def keep_two_y_groups(white_mask: np.ndarray, y_gap: int = 3, min_area_frac: float = 0.001) -> np.ndarray:
+    m = white_mask.astype(np.uint8)
+    H, W = m.shape
+    min_area = max(1, int(min_area_frac * H * W))
 
+    num, labels, stats, _ = cv2.connectedComponentsWithStats(m, connectivity=8)
+    if num <= 1:
+        return white_mask.astype(bool)
+
+    comps = []
+    for lab in range(1, num):
+        area = int(stats[lab, cv2.CC_STAT_AREA])
+        if area < min_area:
+            continue
+        y0 = int(stats[lab, cv2.CC_STAT_TOP])
+        h  = int(stats[lab, cv2.CC_STAT_HEIGHT])
+        y1 = y0 + h - 1
+        comps.append((y0, y1, area, lab))
+
+    if not comps:
+        return np.zeros_like(white_mask, bool)
+
+    # sort by y0 and union intervals with tolerance y_gap
+    comps.sort(key=lambda t: t[0])
+    groups = []  # each: dict(y0,y1, area_sum, labels[])
+    cur = {"y0": comps[0][0], "y1": comps[0][1], "area": comps[0][2], "labs": [comps[0][3]]}
+
+    for y0, y1, area, lab in comps[1:]:
+        if y0 <= cur["y1"] + y_gap:
+            cur["y1"] = max(cur["y1"], y1)
+            cur["area"] += area
+            cur["labs"].append(lab)
+        else:
+            groups.append(cur)
+            cur = {"y0": y0, "y1": y1, "area": area, "labs": [lab]}
+    groups.append(cur)
+
+    # keep top-2 groups by total area
+    groups.sort(key=lambda g: g["area"], reverse=True)
+    keep_groups = groups[:2]
+
+    out = np.zeros_like(m)
+    for g in keep_groups:
+        for lab in g["labs"]:
+            out[labels == lab] = 1
+    return out.astype(bool)
 
 def cut_to_the_chase_efficient(image_path, mask_path):
     """
@@ -439,14 +474,13 @@ def cut_to_the_chase_efficient(image_path, mask_path):
     base_name = os.path.basename(image_path)
 
     white_mask = binarize_mask(mask, use_otsu=True)   # or use_otsu=False, thr=128..200 if you prefer
-    white_mask = ensure_object_is_white(white_mask)
 
-# Remove tiny components so top noise cannot affect bands / hull / etc.
     white_mask = keep_main_teeth_components(
     white_mask,
-    max_components=2,      # upper + lower teeth
-    min_area_frac=0.01     # only components ≥ 1% of image area survive
+    max_components=None,    # or a large number like 10
+    min_area_frac=0.01
 )
+
 # NEW: try to split by the row-bridge rule
 # --- optional split by row-bridge rule (your function) ---
     white_mask_for_cc, split_y = split_mask_if_row_bridge(white_mask, width_frac=0.10, both_frac=0.50)
@@ -508,7 +542,7 @@ def cut_to_the_chase_efficient(image_path, mask_path):
 )
 
             tau_area = max(50, int(0.002 * comp.xspan() * comp.yspan()))  # small safety floor
-            close=0.6666
+            close=0.7
             picked =None
             if max(top_cvx, bot_cvx) >= tau_area:
                 if abs(top_cvx - bot_cvx) <= close * max(top_cvx, bot_cvx):
@@ -618,4 +652,3 @@ def main():
 if __name__ == "__main__":
 
     main()
-

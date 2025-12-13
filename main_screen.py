@@ -49,14 +49,14 @@ def get_directory_size(path: str) -> int:
     return total_size
 
 
-def run_model(input_dir: str, weights: str, threshold: float,size:float, stride:float) -> bool:
+def run_model(input_dir: str, weights: str) -> bool:
     script_dir = os.path.dirname(os.path.abspath(__file__))
     # Treat Gingivitis-Project as project root
     project_root = script_dir
 
     if weights == "best_model.pth":
         temp_dir = os.path.join(script_dir, "temp_teeth_model")
-        weights_path = os.path.join(project_root,"weights_results" ,"best_model.pth")
+        weights_path = os.path.join(project_root, "weights&results", "best_model.pth")
     else:
         temp_dir = os.path.join(script_dir, "temp_gingivitis_model")
         weights_path = os.path.join(project_root, "best_model_ging_clean.pth")
@@ -69,10 +69,7 @@ def run_model(input_dir: str, weights: str, threshold: float,size:float, stride:
         model_script,
         "--weights", weights_path,
         "--input", input_dir,
-        "--output", temp_dir,
-        "--crop-size", str(size),
-        "--stride",str(stride),
-        "--threshold",  str(threshold)
+        "--output", temp_dir
     ]
 
     try:
@@ -133,13 +130,12 @@ def run_get_relevant(original_input_dir: str) -> bool:
 def run_postprocess_black_pixels(original_input_dir: str, masks_dir: str) -> str:
     """
     Run postprocessing: blacken out all mask pixels where the original image is black.
-    Ensures every mask from masks_dir exists in out_dir (copies unchanged if skipped).
-    Returns out_dir.
+    Returns the directory containing postprocessed masks.
     """
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = script_dir
 
-    postprocess_script = os.path.join(project_root, "tools", "postprocess_black_pixels.py")
+    postprocess_script = os.path.join(project_root, "tools", "post.py")
     out_dir = os.path.join(script_dir, "temp_gingivitis_model_post")
 
     cmd = [
@@ -156,36 +152,21 @@ def run_postprocess_black_pixels(original_input_dir: str, masks_dir: str) -> str
         print("       " + " ".join(cmd))
         result = subprocess.run(cmd, check=True, capture_output=True, text=True)
         print(result.stdout)
+        return out_dir
     except subprocess.CalledProcessError as e:
         print("\n[ERROR] Error running postprocess_black_pixels.py:")
         print(e.stderr)
-        return masks_dir  # total fallback
-
-    # ---- Backfill: copy any masks that postprocess skipped ----
-    os.makedirs(out_dir, exist_ok=True)
-
-    src_masks = [f for f in os.listdir(masks_dir) if f.lower().endswith(".png")]
-    copied = 0
-    for f in src_masks:
-        src = os.path.join(masks_dir, f)
-        dst = os.path.join(out_dir, f)
-        if not os.path.exists(dst):
-            shutil.copy2(src, dst)
-            copied += 1
-
-    print(f"[INFO] Postprocess backfill: copied {copied} unchanged masks into {out_dir}")
-    return out_dir
-
+        # Fallback: just use original masks dir
+        return masks_dir
 
 def create_final_results(original_input_dir: str, masks_dir: str) -> bool:
     """
-    Create green-outline results (contours only) and save them in a folder called 'preds'.
+    Create green-overlay results and save them in a folder called 'preds'.
     """
-    import cv2  # ensure opencv is available
-
     script_dir = os.path.dirname(os.path.abspath(__file__))
     gingivitis_masks_dir = masks_dir
 
+    # Save to 'preds'
     final_results_dir = os.path.join(script_dir, "preds")
     os.makedirs(final_results_dir, exist_ok=True)
 
@@ -195,22 +176,19 @@ def create_final_results(original_input_dir: str, masks_dir: str) -> bool:
             if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))
         ]
 
-        print(f"\n[INFO] Creating final results with green outline for {len(image_files)} images...")
+        print(f"\n[INFO] Creating final results with green overlay for {len(image_files)} images...")
         print(f"[INFO] Output folder: {final_results_dir}")
 
         for img_file in image_files:
             img_path = os.path.join(original_input_dir, img_file)
-
-            # try both common mask naming conventions
-            mask_name1 = os.path.splitext(img_file)[0] + ".png"   # 108.png
-            mask_name2 = img_file + ".png"                        # 108.JPG.png
-            mask_path = os.path.join(gingivitis_masks_dir, mask_name1)
-            if not os.path.exists(mask_path):
-                mask_path = os.path.join(gingivitis_masks_dir, mask_name2)
+            mask_name = os.path.splitext(img_file)[0] + ".png"
+            mask_path = os.path.join(gingivitis_masks_dir, mask_name)
 
             if not os.path.exists(mask_path):
                 print(f"[WARN] No mask found for {img_file}, copying original")
-                Image.open(img_path).save(os.path.join(final_results_dir, img_file))
+                img = Image.open(img_path)
+                output_path = os.path.join(final_results_dir, img_file)
+                img.save(output_path)
                 continue
 
             img = Image.open(img_path).convert("RGB")
@@ -222,16 +200,21 @@ def create_final_results(original_input_dir: str, masks_dir: str) -> bool:
             img_array = np.array(img)
             mask_array = np.array(mask)
 
-            # binary mask
-            _, binary_mask = cv2.threshold(mask_array, 127, 255, cv2.THRESH_BINARY)
+            white_pixels = mask_array > 127
 
-            # contours of predicted region
-            contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            overlay = img_array.copy()
+            overlay[white_pixels] = [0, 255, 0]
 
+            alpha = 0.4
             result = img_array.copy()
-            cv2.drawContours(result, contours, -1, (0, 255, 0), thickness=3)
+            result[white_pixels] = (
+                alpha * overlay[white_pixels] +
+                (1 - alpha) * img_array[white_pixels]
+            ).astype(np.uint8)
 
-            Image.fromarray(result).save(os.path.join(final_results_dir, img_file))
+            result_img = Image.fromarray(result)
+            output_path = os.path.join(final_results_dir, img_file)
+            result_img.save(output_path)
 
         print(f"\n[INFO] Final results saved to: {final_results_dir}")
         return True
@@ -239,7 +222,6 @@ def create_final_results(original_input_dir: str, masks_dir: str) -> bool:
     except Exception as e:
         print(f"\n[ERROR] Failed to create final results: {str(e)}")
         return False
-
 
 
 def cleanup_temp_directories():
@@ -293,7 +275,7 @@ def process_directory(path: str):
             print("[INFO] Disk space check passed.")
 
         # 1) Run teeth model
-        if not run_model(path, "best_model.pth",0.5,512,256):
+        if not run_model(path, "best_model.pth"):
             print("\n[ERROR] Teeth model failed. Aborting.")
             sys.exit(1)
 
@@ -310,19 +292,20 @@ def process_directory(path: str):
             print(f"\n[ERROR] temp_relevant_images directory not found at {temp_relevant_dir}")
             sys.exit(1)
 
-        if not run_model(temp_relevant_dir, "best_model_ging_clean.pth",0.15,256,128):
+        if not run_model(temp_relevant_dir, "best_model_ging_clean.pth"):
             print("\n[ERROR] Gingivitis model failed. Aborting.")
             sys.exit(1)
         gingivitis_masks_dir = os.path.join(script_dir, "temp_gingivitis_model")
         post_masks_dir = run_postprocess_black_pixels(path, gingivitis_masks_dir)
         # 4) Create final overlays -> preds/
-
+        
         if not create_final_results(path, masks_dir=post_masks_dir):
             print("\n[ERROR] Failed to create final results. Aborting.")
             sys.exit(1)
 
         # 5) Cleanup
         cleanup_temp_directories()
+
         print("\n[SUCCESS] Processing completed successfully!")
 
     except Exception as e:
