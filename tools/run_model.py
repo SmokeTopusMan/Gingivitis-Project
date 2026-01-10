@@ -122,12 +122,17 @@ def load_model(weights_path, device, encoder_name="resnet34", encoder_weights="i
         in_channels=3,
         classes=1,
     ).to(device)
+
     state = torch.load(weights_path, map_location=device)
 
-    if list(state.keys())[0].startswith('module.'):
-        state = {k.replace('module.', '', 1): v for k, v in state.items()}
+    new_state = {}
+    for key, value in state.items():
+        new_key = key
+        while new_key.startswith('module.'):
+            new_key = new_key[7:]
+        new_state[new_key] = value
 
-    model.load_state_dict(state)
+    model.load_state_dict(new_state)
     return model
 
 
