@@ -6,6 +6,7 @@ import torch
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 import segmentation_models_pytorch as smp
+import argparse
 
 
 def create_gaussian_weight_map(crop_size, sigma=None):
@@ -136,60 +137,38 @@ def is_image_file(name):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="UNet++ General Segmentation - Inference Script\n\n"
-                    "This script uses trained UNet++ model weights to predict segmentation masks from images.\n"
-                    "Works with any UNet++ model (teeth, gingivitis, or other segmentation tasks).\n"
-                    "It processes all images in an input folder using sliding window inference with optional TTA.\n\n"
-                    "Example usage:\n"
-                    "  Basic:  python unetpp_inference.py --weights model.pth --input ./images --output ./masks\n"
-                    "  With custom encoder: python unetpp_inference.py --weights model.pth --input ./images --output ./masks --encoder resnet50\n"
-                    "  With TTA: python unetpp_inference.py --weights model.pth --input ./images --output ./masks --tta\n"
-                    "  Custom params: python unetpp_inference.py --weights model.pth --input ./images --output ./masks --crop-size 1024 --stride 512 --threshold 0.6\n\n",
+        description="UNet++ General Segmentation - Inference Script",
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("--weights", required=True, help="Path to trained model weights file (.pth)")
     parser.add_argument("--input", required=True, help="Directory containing input images")
     parser.add_argument("--output", required=True, help="Directory where predicted masks will be saved")
-    parser.add_argument("--encoder", type=str, default="resnet34", 
-                        help="Encoder architecture (default: resnet34). Options: resnet18, resnet34, resnet50, resnet101, efficientnet-b0, etc.")
+    parser.add_argument("--encoder", type=str, default="resnet34",
+                        help="Encoder architecture (default: resnet34)")
     parser.add_argument("--encoder-weights", type=str, default="imagenet",
-                        help="Encoder pretrained weights (default: imagenet). Use 'None' for no pretraining.")
+                        help="Encoder pretrained weights (default: imagenet)")
     parser.add_argument("--crop-size", type=int, default=512, help="Size of sliding window crops (default: 512)")
     parser.add_argument("--stride", type=int, default=256,
-                        help="Stride for sliding window (default: 256, smaller = more overlap)")
+                        help="Stride for sliding window (default: 256)")
     parser.add_argument("--batch-size", type=int, default=4,
                         help="Number of crops to process simultaneously (default: 4)")
     parser.add_argument("--threshold", type=float, default=0.5,
                         help="Probability threshold for binary mask (default: 0.5)")
     parser.add_argument("--tta", action="store_true",
-                        help="Enable test-time augmentation (horizontal/vertical flips) for better accuracy")
+                        help="Enable test-time augmentation")
     parser.add_argument("--no-gauss", action="store_true",
-                        help="Disable Gaussian blending of overlapping crops (use uniform weights)")
+                        help="Disable Gaussian blending of overlapping crops")
     args = parser.parse_args()
 
-    # Required arguments
-    weights_path = sys.argv[1]
-    input_folder = sys.argv[2]
-    output_folder = sys.argv[3]
-
-    # Optional arguments with defaults
-    crop_size = int(sys.argv[4]) if len(sys.argv) > 4 else 512
-    stride = int(sys.argv[5]) if len(sys.argv) > 5 else 256
-    batch_size = int(sys.argv[6]) if len(sys.argv) > 6 else 4
-    threshold = float(sys.argv[7]) if len(sys.argv) > 7 else 0.5
-    use_tta = bool(int(sys.argv[8])) if len(sys.argv) > 8 else False
-    no_gauss = bool(int(sys.argv[9])) if len(sys.argv) > 9 else False
-
-    # Validate paths
-    if not os.path.exists(weights_path):
-        print(f"Error: Weights file not found: {weights_path}")
+    if not os.path.exists(args.weights):
+        print(f"Error: Weights file not found: {args.weights}")
         sys.exit(1)
 
-    if not os.path.exists(input_folder):
-        print(f"Error: Input folder not found: {input_folder}")
+    if not os.path.exists(args.input):
+        print(f"Error: Input folder not found: {args.input}")
         sys.exit(1)
 
-    os.makedirs(output_folder, exist_ok=True)
+    os.makedirs(args.output, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if torch.cuda.is_available():
@@ -198,17 +177,18 @@ def main():
         print("Using CPU")
 
     encoder_weights_arg = None if args.encoder_weights.lower() == 'none' else args.encoder_weights
-    
-    print(f"Loading model with encoder: {args.encoder}, pretrained on: {encoder_weights_arg or 'random initialization'}")
+
+    print(
+        f"Loading model with encoder: {args.encoder}, pretrained on: {encoder_weights_arg or 'random initialization'}")
     model = load_model(args.weights, device, encoder_name=args.encoder, encoder_weights=encoder_weights_arg)
     model.eval()
 
-    files = [f for f in sorted(os.listdir(input_folder)) if is_image_file(f)]
-    print(f"Found {len(files)} images in {input_folder}\n")
+    files = [f for f in sorted(os.listdir(args.input)) if is_image_file(f)]
+    print(f"Found {len(files)} images in {args.input}\n")
 
     for idx, fname in enumerate(files, 1):
-        in_path = os.path.join(input_folder, fname)
-        out_path = os.path.join(output_folder, fname.rsplit('.', 1)[0] + ".png")
+        in_path = os.path.join(args.input, fname)
+        out_path = os.path.join(args.output, fname.rsplit('.', 1)[0] + ".jpg")
 
         try:
             pil_img = Image.open(in_path).convert("RGB")
@@ -218,19 +198,19 @@ def main():
                 pil_img,
                 model,
                 device,
-                crop_size=crop_size,
-                stride=stride,
-                batch_size=batch_size,
-                threshold=threshold,
-                use_tta=use_tta,
-                use_gaussian_weights=not no_gauss
+                crop_size=args.crop_size,
+                stride=args.stride,
+                batch_size=args.batch_size,
+                threshold=args.threshold,
+                use_tta=args.tta,
+                use_gaussian_weights=not args.no_gauss
             )
 
             Image.fromarray(mask).save(out_path)
         except Exception as e:
             print(f"  [!] Error on {fname}: {e}")
 
-    print(f"\nDone. Masks saved to: {output_folder}")
+    print(f"\nDone. Masks saved to: {args.output}")
 
 
 if __name__ == "__main__":
