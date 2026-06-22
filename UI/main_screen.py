@@ -174,8 +174,8 @@ class GingivitisApp:
 
         hint_label = tk.Label(
             instruction_frame,
-            text="Place your hand-made masks (same filename as the images) inside a masks/ subfolder"
-            " to enable model vs. dentist comparison",
+            text="The folder must contain an Images/ subfolder and a Masks/ subfolder"
+            " (masks must have the same filename as their corresponding image)",
             font=("Segoe UI", 9),
             bg="white",
             fg="#7f8c8d",
@@ -350,29 +350,29 @@ class GingivitisApp:
 
     def _create_final_results(self, original_input_dir):
         script_dir = os.path.dirname(os.path.abspath(__file__))
+        images_dir = os.path.join(original_input_dir, "Images")
         gingivitis_masks_dir = os.path.join(script_dir, "temp_gingivitis_model")
-        final_results_dir = os.path.join(script_dir, "final_result")
+        results_dir = os.path.join(script_dir, "final_result", "Results")
 
-        os.makedirs(final_results_dir, exist_ok=True)
+        os.makedirs(results_dir, exist_ok=True)
 
         try:
             import cv2
 
-            image_files = [f for f in os.listdir(original_input_dir)
+            image_files = [f for f in os.listdir(images_dir)
                            if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))]
 
             print(f"Creating final results with green outline for {len(image_files)} images...")
 
             for img_file in image_files:
-                img_path = os.path.join(original_input_dir, img_file)
+                img_path = os.path.join(images_dir, img_file)
                 mask_name = os.path.splitext(img_file)[0] + ".jpg"
                 mask_path = os.path.join(gingivitis_masks_dir, mask_name)
 
                 if not os.path.exists(mask_path):
                     print(f"Warning: No mask found for {img_file}, copying original")
                     img = Image.open(img_path)
-                    output_path = os.path.join(final_results_dir, img_file)
-                    img.save(output_path)
+                    img.save(os.path.join(results_dir, img_file))
                     continue
 
                 img = Image.open(img_path).convert("RGB")
@@ -385,17 +385,14 @@ class GingivitisApp:
                 mask_array = np.array(mask)
 
                 _, binary_mask = cv2.threshold(mask_array, 127, 255, cv2.THRESH_BINARY)
-
                 contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
                 result = img_array.copy()
                 cv2.drawContours(result, contours, -1, (0, 255, 0), thickness=3)
 
-                result_img = Image.fromarray(result)
-                output_path = os.path.join(final_results_dir, img_file)
-                result_img.save(output_path)
+                Image.fromarray(result).save(os.path.join(results_dir, img_file))
 
-            print(f"Final results saved to: {final_results_dir}")
+            print(f"Results saved to: {results_dir}")
             return True
 
         except Exception as e:
@@ -405,26 +402,23 @@ class GingivitisApp:
 
     def _create_comparison(self, original_input_dir):
         script_dir = os.path.dirname(os.path.abspath(__file__))
+        images_dir = os.path.join(original_input_dir, "Images")
         gingivitis_masks_dir = os.path.join(script_dir, "temp_gingivitis_model")
-        dentist_masks_dir = os.path.join(original_input_dir, "masks")
+        dentist_masks_dir = os.path.join(original_input_dir, "Masks")
         comparison_dir = os.path.join(script_dir, "final_result", "Comparison")
-
-        if not os.path.exists(dentist_masks_dir):
-            print("No masks/ subfolder found — skipping comparison.")
-            return True
 
         os.makedirs(comparison_dir, exist_ok=True)
 
         try:
             import cv2
 
-            image_files = [f for f in os.listdir(original_input_dir)
+            image_files = [f for f in os.listdir(images_dir)
                            if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))]
 
             print(f"Creating comparison images for {len(image_files)} images...")
 
             for img_file in image_files:
-                img_path = os.path.join(original_input_dir, img_file)
+                img_path = os.path.join(images_dir, img_file)
 
                 # Model mask produced by the gingivitis model
                 model_mask_path = os.path.join(gingivitis_masks_dir,
@@ -533,32 +527,40 @@ class GingivitisApp:
                         f"Available: {available_gb:.2f} GB"
                     )
                 else:
+                    images_dir = os.path.join(path, "Images")
+                    masks_dir  = os.path.join(path, "Masks")
+
+                    if not os.path.isdir(images_dir):
+                        messagebox.showerror(
+                            "Missing Folder",
+                            f"Could not find an Images/ subfolder inside the selected directory.\n\n"
+                            f"Expected: {images_dir}"
+                        )
+                        return
+                    if not os.path.isdir(masks_dir):
+                        messagebox.showerror(
+                            "Missing Folder",
+                            f"Could not find a Masks/ subfolder inside the selected directory.\n\n"
+                            f"Expected: {masks_dir}"
+                        )
+                        return
+
                     print(f"Directory path submitted: {path}")
 
-                    if self._run_model(path, "Teeth_model_weights.pth"):
-                        if self._run_get_relevant(path):
+                    if self._run_model(images_dir, "Teeth_model_weights.pth"):
+                        if self._run_get_relevant(images_dir):
                             temp_relevant_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                                              "temp_relevant_images")
                             if self._run_model(temp_relevant_dir, "Gingivitis_model_weights.pth"):
                                 if self._create_final_results(path):
-                                    has_masks = os.path.isdir(os.path.join(path, "masks"))
                                     self._create_comparison(path)
                                     self._cleanup_temp_directories()
-                                    if has_masks:
-                                        messagebox.showinfo(
-                                            "Success",
-                                            "Processing completed successfully!\n\n"
-                                            "Annotated images are in final_result/\n"
-                                            "Model vs. dentist comparison is in final_result/Comparison/"
-                                        )
-                                    else:
-                                        messagebox.showinfo(
-                                            "Success",
-                                            "Processing completed successfully!\n\n"
-                                            "Annotated images are in final_result/\n\n"
-                                            "Tip: add a masks/ subfolder with your hand-made\n"
-                                            "gingivitis masks to enable expert comparison."
-                                        )
+                                    messagebox.showinfo(
+                                        "Success",
+                                        "Processing completed successfully!\n\n"
+                                        "Annotated images  →  final_result/Results/\n"
+                                        "Model vs. dentist →  final_result/Comparison/"
+                                    )
 
             except Exception as e:
                 messagebox.showerror("Error", f"An error occurred: {str(e)}")
