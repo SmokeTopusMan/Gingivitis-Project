@@ -8,6 +8,11 @@ from albumentations.pytorch import ToTensorV2
 import segmentation_models_pytorch as smp
 import argparse
 
+try:
+    import intel_extension_for_pytorch as ipex  # noqa: F401  enables torch.xpu
+except ImportError:
+    pass
+
 
 def create_gaussian_weight_map(crop_size, sigma=None):
     if sigma is None:
@@ -175,10 +180,14 @@ def main():
 
     os.makedirs(args.output, exist_ok=True)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if torch.cuda.is_available():
-        print(f"Using GPU: {torch.cuda.get_device_name(0)}")
+        device = torch.device("cuda")
+        print(f"Using NVIDIA GPU: {torch.cuda.get_device_name(0)}")
+    elif hasattr(torch, "xpu") and torch.xpu.is_available():
+        device = torch.device("xpu")
+        print(f"Using Intel XPU: {torch.xpu.get_device_name(0)}")
     else:
+        device = torch.device("cpu")
         print("Using CPU")
 
     encoder_weights_arg = None if args.encoder_weights.lower() == 'none' else args.encoder_weights
