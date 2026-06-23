@@ -475,6 +475,46 @@ class GingivitisApp:
                 result[dentist_only] = (1 - alpha) * result[dentist_only] + alpha * green
 
                 result = np.clip(result, 0, 255).astype(np.uint8)
+
+                # Compute percentages relative to total detected area
+                total = int(intersection.sum() + model_only.sum() + dentist_only.sum())
+                if total > 0:
+                    inter_pct   = intersection.sum() / total * 100
+                    model_pct   = model_only.sum()   / total * 100
+                    dentist_pct = dentist_only.sum() / total * 100
+                else:
+                    inter_pct = model_pct = dentist_pct = 0.0
+
+                # Draw stats box in top-right corner
+                H_img, W_img = result.shape[:2]
+                font       = cv2.FONT_HERSHEY_SIMPLEX
+                font_scale = max(0.6, W_img / 2000)
+                thickness  = max(1, int(font_scale * 2))
+                lines = [
+                    (f"Intersection: {inter_pct:.1f}%",   (255,   0,   0)),
+                    (f"Model only:   {model_pct:.1f}%",   (255, 140,   0)),
+                    (f"Dentist only: {dentist_pct:.1f}%", (  0, 210,   0)),
+                ]
+                pad    = int(12 * font_scale)
+                line_h = int(cv2.getTextSize("A", font, font_scale, thickness)[0][1] * 2.2)
+                box_w  = max(cv2.getTextSize(t, font, font_scale, thickness)[0][0] for t, _ in lines) + pad * 2
+                box_h  = line_h * len(lines) + pad
+                margin = 20
+                x0 = W_img - box_w - margin
+                y0 = margin
+
+                # Semi-transparent dark background
+                overlay = result.copy()
+                cv2.rectangle(overlay, (x0, y0), (x0 + box_w, y0 + box_h), (0, 0, 0), -1)
+                result = cv2.addWeighted(overlay, 0.6, result, 0.4, 0)
+
+                # Text lines in matching colors (BGR for OpenCV)
+                for i, (text, rgb) in enumerate(lines):
+                    bgr = (rgb[2], rgb[1], rgb[0])
+                    tx = x0 + pad
+                    ty = y0 + pad + line_h * i + line_h // 2
+                    cv2.putText(result, text, (tx, ty), font, font_scale, bgr, thickness, cv2.LINE_AA)
+
                 Image.fromarray(result).save(os.path.join(comparison_dir, img_file))
 
             print(f"Comparison images saved to: {comparison_dir}")
