@@ -163,13 +163,26 @@ class GingivitisApp:
 
         instruction_label = tk.Label(
             instruction_frame,
-            text="Choose the path of the directory with the images :)",
-            font=("Segoe UI", 11),
+            text="Select a folder containing your dental images and hand-made gingivitis masks",
+            font=("Segoe UI", 11, "bold"),
             bg="white",
             fg="#34495e",
-            pady=15
+            pady=8,
+            wraplength=580
         )
         instruction_label.pack()
+
+        hint_label = tk.Label(
+            instruction_frame,
+            text="The folder must contain an Images/ subfolder and a Masks/ subfolder"
+            " (masks must have the same filename as their corresponding image)",
+            font=("Segoe UI", 9),
+            bg="white",
+            fg="#7f8c8d",
+            pady=6,
+            wraplength=580
+        )
+        hint_label.pack()
 
         path_frame = tk.Frame(main_frame, bg="#f5f5f5")
         path_frame.pack(fill="x", pady=(0, 25))
@@ -337,29 +350,29 @@ class GingivitisApp:
 
     def _create_final_results(self, original_input_dir):
         script_dir = os.path.dirname(os.path.abspath(__file__))
+        images_dir = os.path.join(original_input_dir, "Images")
         gingivitis_masks_dir = os.path.join(script_dir, "temp_gingivitis_model")
-        final_results_dir = os.path.join(script_dir, "final_result")
+        results_dir = os.path.join(script_dir, "final_result", "Results")
 
-        os.makedirs(final_results_dir, exist_ok=True)
+        os.makedirs(results_dir, exist_ok=True)
 
         try:
             import cv2
 
-            image_files = [f for f in os.listdir(original_input_dir)
+            image_files = [f for f in os.listdir(images_dir)
                            if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))]
 
             print(f"Creating final results with green outline for {len(image_files)} images...")
 
             for img_file in image_files:
-                img_path = os.path.join(original_input_dir, img_file)
+                img_path = os.path.join(images_dir, img_file)
                 mask_name = os.path.splitext(img_file)[0] + ".jpg"
                 mask_path = os.path.join(gingivitis_masks_dir, mask_name)
 
                 if not os.path.exists(mask_path):
                     print(f"Warning: No mask found for {img_file}, copying original")
                     img = Image.open(img_path)
-                    output_path = os.path.join(final_results_dir, img_file)
-                    img.save(output_path)
+                    img.save(os.path.join(results_dir, img_file))
                     continue
 
                 img = Image.open(img_path).convert("RGB")
@@ -372,22 +385,145 @@ class GingivitisApp:
                 mask_array = np.array(mask)
 
                 _, binary_mask = cv2.threshold(mask_array, 127, 255, cv2.THRESH_BINARY)
-
                 contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
                 result = img_array.copy()
                 cv2.drawContours(result, contours, -1, (0, 255, 0), thickness=3)
 
-                result_img = Image.fromarray(result)
-                output_path = os.path.join(final_results_dir, img_file)
-                result_img.save(output_path)
+                Image.fromarray(result).save(os.path.join(results_dir, img_file))
 
-            print(f"Final results saved to: {final_results_dir}")
+            print(f"Results saved to: {results_dir}")
             return True
 
         except Exception as e:
             print(f"Error creating final results: {str(e)}")
             messagebox.showerror("Final Results Error", f"Failed to create final results:\n{str(e)}")
+            return False
+
+    def _create_comparison(self, original_input_dir):
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        images_dir = os.path.join(original_input_dir, "Images")
+        gingivitis_masks_dir = os.path.join(script_dir, "temp_gingivitis_model")
+        dentist_masks_dir = os.path.join(original_input_dir, "Masks")
+        comparison_dir = os.path.join(script_dir, "final_result", "Comparison")
+
+        os.makedirs(comparison_dir, exist_ok=True)
+
+        try:
+            import cv2
+
+            image_files = [f for f in os.listdir(images_dir)
+                           if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))]
+
+            print(f"Creating comparison images for {len(image_files)} images...")
+
+            for img_file in image_files:
+                img_path = os.path.join(images_dir, img_file)
+
+                # Model mask produced by the gingivitis model
+                model_mask_path = os.path.join(gingivitis_masks_dir,
+                                               os.path.splitext(img_file)[0] + ".jpg")
+
+                # Dentist mask — try exact filename first, then other extensions
+                dentist_mask_path = os.path.join(dentist_masks_dir, img_file)
+                if not os.path.exists(dentist_mask_path):
+                    stem = os.path.splitext(img_file)[0]
+                    for ext in ('.png', '.jpg', '.jpeg', '.bmp', '.tiff'):
+                        candidate = os.path.join(dentist_masks_dir, stem + ext)
+                        if os.path.exists(candidate):
+                            dentist_mask_path = candidate
+                            break
+
+                if not os.path.exists(model_mask_path):
+                    print(f"Warning: no model mask for {img_file}, skipping")
+                    continue
+                if not os.path.exists(dentist_mask_path):
+                    print(f"Warning: no dentist mask for {img_file}, skipping")
+                    continue
+
+                img = Image.open(img_path).convert("RGB")
+                model_mask = Image.open(model_mask_path).convert("L")
+                dentist_mask = Image.open(dentist_mask_path).convert("L")
+
+                if model_mask.size != img.size:
+                    model_mask = model_mask.resize(img.size, Image.LANCZOS)
+                if dentist_mask.size != img.size:
+                    dentist_mask = dentist_mask.resize(img.size, Image.LANCZOS)
+
+                img_arr = np.array(img, dtype=np.float32)
+                model_arr = np.array(model_mask)
+                dentist_arr = np.array(dentist_mask)
+
+                _, model_bin = cv2.threshold(model_arr, 127, 255, cv2.THRESH_BINARY)
+                _, dentist_bin = cv2.threshold(dentist_arr, 127, 255, cv2.THRESH_BINARY)
+
+                model_bool = model_bin > 0
+                dentist_bool = dentist_bin > 0
+
+                intersection = model_bool & dentist_bool     # red
+                model_only   = model_bool & ~dentist_bool    # orange
+                dentist_only = dentist_bool & ~model_bool    # green
+
+                alpha = 0.45
+                red    = np.array([255,   0,   0], dtype=np.float32)
+                orange = np.array([255, 140,   0], dtype=np.float32)
+                green  = np.array([  0, 210,   0], dtype=np.float32)
+
+                result = img_arr.copy()
+                result[intersection] = (1 - alpha) * result[intersection] + alpha * red
+                result[model_only]   = (1 - alpha) * result[model_only]   + alpha * orange
+                result[dentist_only] = (1 - alpha) * result[dentist_only] + alpha * green
+
+                result = np.clip(result, 0, 255).astype(np.uint8)
+
+                # Compute percentages relative to total detected area
+                total = int(intersection.sum() + model_only.sum() + dentist_only.sum())
+                if total > 0:
+                    inter_pct   = intersection.sum() / total * 100
+                    model_pct   = model_only.sum()   / total * 100
+                    dentist_pct = dentist_only.sum() / total * 100
+                else:
+                    inter_pct = model_pct = dentist_pct = 0.0
+
+                # Draw stats box in top-right corner
+                H_img, W_img = result.shape[:2]
+                font       = cv2.FONT_HERSHEY_SIMPLEX
+                font_scale = max(0.6, W_img / 2000)
+                thickness  = max(1, int(font_scale * 2))
+                lines = [
+                    (f"Intersection: {inter_pct:.1f}%",   (255,   0,   0)),
+                    (f"Model only:   {model_pct:.1f}%",   (255, 140,   0)),
+                    (f"Dentist only: {dentist_pct:.1f}%", (  0, 210,   0)),
+                ]
+                pad    = int(12 * font_scale)
+                line_h = int(cv2.getTextSize("A", font, font_scale, thickness)[0][1] * 2.2)
+                box_w  = max(cv2.getTextSize(t, font, font_scale, thickness)[0][0] for t, _ in lines) + pad * 2
+                box_h  = line_h * len(lines) + pad
+                margin = 20
+                x0 = W_img - box_w - margin
+                y0 = margin
+
+                # Semi-transparent dark background
+                overlay = result.copy()
+                cv2.rectangle(overlay, (x0, y0), (x0 + box_w, y0 + box_h), (0, 0, 0), -1)
+                result = cv2.addWeighted(overlay, 0.6, result, 0.4, 0)
+
+                # Text lines in matching colors (BGR for OpenCV)
+                for i, (text, rgb) in enumerate(lines):
+                    bgr = (rgb[2], rgb[1], rgb[0])
+                    tx = x0 + pad
+                    ty = y0 + pad + line_h * i + line_h // 2
+                    cv2.putText(result, text, (tx, ty), font, font_scale, bgr, thickness, cv2.LINE_AA)
+
+                Image.fromarray(result).save(os.path.join(comparison_dir, img_file))
+
+            print(f"Comparison images saved to: {comparison_dir}")
+            return True
+
+        except Exception as e:
+            print(f"Error creating comparison images: {str(e)}")
+            messagebox.showerror("Comparison Error",
+                                 f"Failed to create comparison images:\n{str(e)}")
             return False
 
     def _cleanup_temp_directories(self):
@@ -431,16 +567,40 @@ class GingivitisApp:
                         f"Available: {available_gb:.2f} GB"
                     )
                 else:
+                    images_dir = os.path.join(path, "Images")
+                    masks_dir  = os.path.join(path, "Masks")
+
+                    if not os.path.isdir(images_dir):
+                        messagebox.showerror(
+                            "Missing Folder",
+                            f"Could not find an Images/ subfolder inside the selected directory.\n\n"
+                            f"Expected: {images_dir}"
+                        )
+                        return
+                    if not os.path.isdir(masks_dir):
+                        messagebox.showerror(
+                            "Missing Folder",
+                            f"Could not find a Masks/ subfolder inside the selected directory.\n\n"
+                            f"Expected: {masks_dir}"
+                        )
+                        return
+
                     print(f"Directory path submitted: {path}")
 
-                    if self._run_model(path, "Teeth_model_weights.pth"):
-                        if self._run_get_relevant(path):
+                    if self._run_model(images_dir, "Teeth_model_weights.pth"):
+                        if self._run_get_relevant(images_dir):
                             temp_relevant_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                                              "temp_relevant_images")
                             if self._run_model(temp_relevant_dir, "Gingivitis_model_weights.pth"):
                                 if self._create_final_results(path):
+                                    self._create_comparison(path)
                                     self._cleanup_temp_directories()
-                                    messagebox.showinfo("Success", "Processing completed successfully!")
+                                    messagebox.showinfo(
+                                        "Success",
+                                        "Processing completed successfully!\n\n"
+                                        "Annotated images  →  final_result/Results/\n"
+                                        "Model vs. dentist →  final_result/Comparison/"
+                                    )
 
             except Exception as e:
                 messagebox.showerror("Error", f"An error occurred: {str(e)}")
