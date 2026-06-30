@@ -1,0 +1,26 @@
+name: gingivitis
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  # PyTorch (CUDA 12.1 — compatible with RTX 3090 on Lambda)
+  - pytorch
+  - torchvision
+  - pytorch-cuda=12.1
+  # Core numerics / image I/O
+  - numpy
+  - pillow
+  - opencv
+  # UI (main_screen.py)
+  - tk
+  - pip
+  - pip:
+      - segmentation-models-pytorch
+      - albumentations
+      # gdrive_downloader.py
+      - google-api-python-client
+      - google-auth-httplib2
+      - google-auth-oauthlib
